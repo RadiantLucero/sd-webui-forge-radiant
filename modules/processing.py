@@ -1761,9 +1761,7 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
             self.extra_generation_params["img2img alpha"] = self.img2img_alpha_mode
         if self.img2img_alpha_mode == "Native":
             vae = self.sd_model.forge_objects.vae
-            encoder = getattr(getattr(vae.first_stage_model, "encoder", None), "conv1", None)
-            if getattr(encoder, "in_channels", None) != 4 or vae.output_channels != 4:
-                raise RuntimeError("Native img2img alpha requires a VAE with four-channel image encoding and decoding.")
+            img2img_alpha.validate_native_vae(vae)
             if opts.sd_vae_encode_method != "Full" or opts.sd_vae_decode_method != "Full":
                 raise RuntimeError("Native img2img alpha requires the Full VAE encoder and decoder.")
             if opts.krea2_do_reference:

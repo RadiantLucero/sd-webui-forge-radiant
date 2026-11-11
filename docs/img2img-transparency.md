@@ -16,6 +16,9 @@ Reconstruction is approximate: a single RGB image does not uniquely determine
 its original alpha. Newly generated colors may resemble the background. Inpainting
 uses the overlay mask to preserve the original outside the edited area; disabling
 the inpainting overlay also disables that preservation.
+When the output remains compatible with a partially transparent original pixel,
+its color is used to estimate alpha before removing the background color. This
+reduces excessive saturation from assuming the lowest possible alpha.
 The reconstruction is a generalized color-compositing heuristic inspired by the
 original green/cyan restoration script, not a direct port of its edge classifiers.
 
