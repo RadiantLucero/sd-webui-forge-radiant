@@ -603,7 +603,7 @@ def _process_alpha(image: Image.Image) -> Image.Image:
     return Image.merge("RGBA", (*rgb.split(), alpha))
 
 
-def save_image_with_geninfo(image, geninfo, filename, extension=None, existing_pnginfo=None, pnginfo_section_name="parameters"):
+def save_image_with_geninfo(image, geninfo, filename, extension=None, existing_pnginfo=None, pnginfo_section_name="parameters", preserve_alpha=False):
     """
     Saves image to filename, including geninfo as text information for generation info.
     For PNG images, geninfo is added to existing pnginfo dictionary using the pnginfo_section_name argument as key.
@@ -613,8 +613,12 @@ def save_image_with_geninfo(image, geninfo, filename, extension=None, existing_p
     if extension is None:
         extension = os.path.splitext(filename)[1]
 
+    if preserve_alpha and extension.lower() not in (".png", ".webp"):
+        raise ValueError("Preserving img2img alpha requires PNG or WebP output.")
+
     image_format = Image.registered_extensions()[extension]
-    image = _process_alpha(image)
+    if not preserve_alpha:
+        image = _process_alpha(image)
 
     if extension.lower() == ".png":
         existing_pnginfo = existing_pnginfo or {}
@@ -758,7 +762,7 @@ def save_image(image, path, basename, seed=None, prompt=None, extension="png", i
         """
         temp_file_path = f"{filename_without_extension}.tmp"
 
-        save_image_with_geninfo(image_to_save, info, temp_file_path, extension, existing_pnginfo=params.pnginfo, pnginfo_section_name=pnginfo_section_name)
+        save_image_with_geninfo(image_to_save, info, temp_file_path, extension, existing_pnginfo=params.pnginfo, pnginfo_section_name=pnginfo_section_name, preserve_alpha=not grid and getattr(p, "img2img_alpha_mode", "Off") != "Off")
 
         filename = filename_without_extension + extension
         without_extension = filename_without_extension

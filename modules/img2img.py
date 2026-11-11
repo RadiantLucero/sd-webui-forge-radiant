@@ -206,6 +206,8 @@ def img2img_function(id_task: str, request: gr.Request, mode: int, prompt: str, 
         mask = Image.merge("RGBA", (mask, mask, mask, Image.new("L", mask.size, 255)))
     elif mode == 4:  # inpaint upload mask
         image = init_img_inpaint
+        if image is not None and opts.img2img_alpha_mode == "Off":
+            image = image.convert("RGB")
         mask = init_mask_inpaint
 
     if mask and isinstance(mask, Image.Image):

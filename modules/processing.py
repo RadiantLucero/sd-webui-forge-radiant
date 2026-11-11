@@ -32,6 +32,7 @@ from modules import (
     errors,
     extra_networks,
     images,
+    img2img_alpha,
     infotext_utils,
     masking,
     profiling,
@@ -1062,6 +1063,11 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
                 p.batch_index = i
                 x_sample = 255.0 * np.moveaxis(x_sample.cpu().numpy(), 0, 2)
                 x_sample = x_sample.astype(np.uint8)
+                alpha_mode = getattr(p, "img2img_alpha_mode", "Off")
+                if alpha_mode != "Off" and i >= len(p.alpha_references):
+                    raise RuntimeError("An img2img extension returned more images than there are alpha references.")
+                if alpha_mode == "Native" and (x_sample.ndim != 3 or x_sample.shape[2] != 4):
+                    raise RuntimeError("Native img2img alpha requires the VAE decoder to return four channels.")
                 if _is_video:
                     frames.append(x_sample)
 
@@ -1081,6 +1087,11 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
                     p.scripts.postprocess_image(p, pp)
                     image = pp.image
 
+                if alpha_mode == "Native" and image.mode != "RGBA":
+                    raise RuntimeError("An img2img postprocessing extension removed the native alpha channel.")
+                if alpha_mode == "Reconstruct":
+                    image = img2img_alpha.reconstruct(image, p.alpha_references[i], p.alpha_backgrounds[i])
+
                 mask_for_overlay = getattr(p, "mask_for_overlay", None)
 
                 if not shared.opts.overlay_inpaint:
@@ -1091,9 +1102,12 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
                     overlay_image = None
 
                 if p.scripts is not None:
+                    original_mask, original_overlay = mask_for_overlay, overlay_image
                     ppmo = scripts.PostProcessMaskOverlayArgs(i, mask_for_overlay, overlay_image)
                     p.scripts.postprocess_maskoverlay(p, ppmo)
                     mask_for_overlay, overlay_image = ppmo.mask_for_overlay, ppmo.overlay_image
+                    if alpha_mode != "Off" and (mask_for_overlay is not original_mask or overlay_image is not original_overlay):
+                        raise RuntimeError("An img2img extension replaced the inpainting overlay; alpha processing cannot safely apply it.")
 
                 if p.color_corrections is not None and i < len(p.color_corrections):
                     if save_samples and opts.save_images_before_color_correction:
@@ -1105,7 +1119,24 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
                 # that is being composited over the original image,
                 # we need to keep the original image around
                 # and use it in the composite step.
-                image, original_denoised_image = apply_overlay(image, p.paste_to, overlay_image)
+                if alpha_mode != "Off" and overlay_image is not None:
+                    original = p.alpha_originals[i]
+                    if p.paste_to is not None:
+                        x, y, w, h = p.paste_to
+                        resized = images.resize_image(1, image, w, h, force_RGBA=True)
+                        image = Image.new("RGBA", original.size)
+                        image.paste(resized, (x, y))
+                    original_denoised_image = image.copy()
+                    mask = mask_for_overlay
+                    if isinstance(overlay_image, tuple):
+                        mask = Image.fromarray(np.clip(np.round(overlay_image[1] * 255), 0, 255).astype(np.uint8))
+                    if mask is None:
+                        raise RuntimeError("Alpha inpainting requires an overlay mask.")
+                    if mask.size != original.size:
+                        mask = images.resize_image(p.resize_mode, mask, original.width, original.height)
+                    image = img2img_alpha.composite(image, original, mask)
+                else:
+                    image, original_denoised_image = apply_overlay(image, p.paste_to, overlay_image)
 
                 p.pixels_after_sampling.append(image)
 
@@ -1113,6 +1144,8 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
                     pp = scripts.PostprocessImageArgs(image, i + p.iteration * p.batch_size)
                     p.scripts.postprocess_image_after_composite(p, pp)
                     image = pp.image
+                if alpha_mode != "Off" and image.mode != "RGBA":
+                    raise RuntimeError("An img2img postprocessing extension removed the alpha channel.")
 
                 if save_samples:
                     images.save_image(image, p.outpath_samples, "", p.seeds[i], p.prompts[i], opts.samples_format, info=infotext(i), p=p)
@@ -1710,6 +1743,34 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
         self.extra_generation_params["Denoising strength"] = self.denoising_strength
 
         self.image_cfg_scale: float = None
+        self.img2img_alpha_mode = opts.img2img_alpha_mode
+        self.alpha_originals = []
+        self.alpha_references = []
+        self.alpha_backgrounds = []
+        if self.img2img_alpha_mode not in ("Off", "Native", "Reconstruct"):
+            raise ValueError(f"Unknown img2img transparency mode: {self.img2img_alpha_mode}")
+        if self.img2img_alpha_mode != "Off":
+            if self.resize_mode == 3:
+                raise RuntimeError("img2img transparency does not support latent upscale.")
+            if self.restore_faces or opts.img2img_color_correction:
+                raise RuntimeError("Disable face restoration and img2img color correction when using img2img transparency.")
+            if args.dynamic_args.wan or args.dynamic_args.pid:
+                raise RuntimeError("img2img transparency does not support video or PiD processing.")
+            if self.save_samples() and opts.samples_format.lower() not in ("png", "webp"):
+                raise RuntimeError("img2img transparency requires PNG or WebP as the sample image format.")
+            self.extra_generation_params["img2img alpha"] = self.img2img_alpha_mode
+        if self.img2img_alpha_mode == "Native":
+            vae = self.sd_model.forge_objects.vae
+            encoder = getattr(getattr(vae.first_stage_model, "encoder", None), "conv1", None)
+            if getattr(encoder, "in_channels", None) != 4 or vae.output_channels != 4:
+                raise RuntimeError("Native img2img alpha requires a VAE with four-channel image encoding and decoding.")
+            if opts.sd_vae_encode_method != "Full" or opts.sd_vae_decode_method != "Full":
+                raise RuntimeError("Native img2img alpha requires the Full VAE encoder and decoder.")
+            if opts.krea2_do_reference:
+                from backend.diffusion_engine.krea import Krea2
+
+                if isinstance(self.sd_model, Krea2):
+                    raise RuntimeError("Native img2img alpha does not support Krea2 reference conditioning; disable Krea2 Enable Reference.")
 
         self.sampler = sd_samplers.create_sampler(self.sampler_name, self.sd_model)
 
@@ -1796,12 +1857,22 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
             if opts.save_init_img:
                 images.save_image(img, path=opts.outdir_init_images, basename=None, forced_filename=self.init_img_hash, save_to_dirs=False, existing_info=img.info)
 
-            image = images.flatten(img, opts.img2img_background_color)
+            if self.img2img_alpha_mode == "Off":
+                image = images.flatten(img, opts.img2img_background_color)
+            else:
+                image = img.convert("RGBA")
             _image_size: tuple[int, int] = image.size
 
             if crop_region is None and self.resize_mode != 3:  # Whole picture / img2img
-                image = images.resize_image(self.resize_mode, image, self.width, self.height)
+                image = images.resize_image(self.resize_mode, image, self.width, self.height, force_RGBA=self.img2img_alpha_mode != "Off")
                 self.width, self.height = image.size
+
+            if self.img2img_alpha_mode != "Off":
+                self.alpha_originals.append(image.copy())
+                background = img2img_alpha.background_color(image, opts.img2img_background_color, opts.img2img_alpha_auto_background and self.img2img_alpha_mode == "Reconstruct")
+                self.alpha_backgrounds.append(background)
+                if self.img2img_alpha_mode == "Reconstruct":
+                    image = images.flatten(image, background)
 
             if image_mask is not None:
                 _scales = tuple(y / x for y, x in zip(_image_size, _orig_size))
@@ -1829,10 +1900,18 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
                     x1, y1, x2, y2 = crop_region
                     self.paste_to = (x1, y1, x2 - x1, y2 - y1)
                 image = image.crop(crop_region)
-                image = images.resize_image(2, image, self.width, self.height)
+                image = images.resize_image(2, image, self.width, self.height, force_RGBA=self.img2img_alpha_mode == "Native")
+
+            if self.img2img_alpha_mode != "Off":
+                reference = self.alpha_originals[-1]
+                if crop_region is not None:
+                    reference = images.resize_image(2, reference.crop(crop_region), self.width, self.height, force_RGBA=True)
+                    if self.img2img_alpha_mode == "Reconstruct":
+                        image = images.flatten(reference, background)
+                self.alpha_references.append(reference)
 
             if image_mask is not None and self.inpainting_fill != 1:
-                image = masking.fill(image, latent_mask)
+                image = masking.fill(image, latent_mask, preserve_alpha=self.img2img_alpha_mode == "Native")
 
             if add_color_corrections:
                 self.color_corrections.append(setup_color_correction(image))
@@ -1844,6 +1923,10 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
 
         if len(imgs) == 1:
             batch_images = np.expand_dims(imgs[0], axis=0).repeat(self.batch_size, axis=0)
+            if self.img2img_alpha_mode != "Off":
+                self.alpha_originals *= self.batch_size
+                self.alpha_references *= self.batch_size
+                self.alpha_backgrounds *= self.batch_size
             if self.overlay_images is not None:
                 self.overlay_images = self.overlay_images * self.batch_size
 
@@ -1855,6 +1938,9 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
             batch_images = np.array(imgs)
         else:
             raise RuntimeError(f"bad number of images passed: {len(imgs)}; expecting {self.batch_size} or less")
+
+        if self.img2img_alpha_mode == "Reconstruct":
+            self.extra_generation_params["img2img alpha background"] = ", ".join("#%02x%02x%02x" % color for color in self.alpha_backgrounds)
 
         image = torch.from_numpy(batch_images)
         image = image.to(shared.device, dtype=torch.float32)
