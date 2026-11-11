@@ -709,9 +709,18 @@ class Qwen3VL(BaseLlama, nn.Module):
 
     def preprocess_embed(self, embed, device):
         if embed["type"] == "image":
-            image, grid = qwen_vl.process_qwen2vl_images(embed["data"], patch_size=16, image_mean=[0.5, 0.5, 0.5], image_std=[0.5, 0.5, 0.5])
-            merged, deepstack = self.visual(image.to(text_encoder_device(), dtype=torch.float32), grid)
-            return merged.to(device), {"grid": grid, "deepstack": [features.to(device) for features in deepstack]}
+            data = embed["data"]
+            images = data if isinstance(data, list) else [data]
+            merged_all, deepstack_all, grids = [], [], []
+            for img in images:
+                image, grid = qwen_vl.process_qwen2vl_images(img, patch_size=16, image_mean=[0.5, 0.5, 0.5], image_std=[0.5, 0.5, 0.5])
+                merged, deepstack = self.visual(image.to(text_encoder_device(), dtype=torch.float32), grid)
+                merged_all.append(merged.to(device))
+                deepstack_all.append([features.to(device) for features in deepstack])
+                grids.append(grid)
+            merged = torch.cat(merged_all, dim=0)
+            deepstack = [torch.cat([ds[i] for ds in deepstack_all], dim=0) for i in range(len(deepstack_all[0]))]
+            return merged, {"grid": grids[0], "deepstack": deepstack, "packed": len(images) > 1}
         return None, None
 
     def build_image_inputs(self, embeds, embeds_info):
@@ -721,7 +730,8 @@ class Qwen3VL(BaseLlama, nn.Module):
 
         device = embeds.device
         seq = embeds.shape[1]
-        position_ids = qwen_vl.qwen2vl_mrope_position_ids(embeds_info, seq, device)
+        packed = any(isinstance(e.get("extra"), dict) and e["extra"].get("packed") for e in images)
+        position_ids = None if packed else qwen_vl.qwen2vl_mrope_position_ids(embeds_info, seq, device)
 
         visual_pos_masks = torch.zeros((1, seq), dtype=torch.bool, device=device)
         deepstack = None
@@ -737,10 +747,11 @@ class Qwen3VL(BaseLlama, nn.Module):
         return position_ids, visual_pos_masks, deepstack
 
     def forward(self, input_ids, attention_mask=None, embeds=None, num_tokens=None, intermediate_output=None, final_layer_norm_intermediate=True, dtype=None, embeds_info=[], **kwargs):
+        self.last_embeds_info = embeds_info
         position_ids = kwargs.pop("position_ids", None)
         visual_pos_masks = kwargs.pop("visual_pos_masks", None)
         deepstack_embeds = kwargs.pop("deepstack_embeds", None)
-        if embeds is not None and position_ids is None:
+        if getattr(self, "native_vision_inputs", True) and embeds is not None and position_ids is None:
             position_ids, visual_pos_masks, deepstack_embeds = self.build_image_inputs(embeds, embeds_info)
         return self.model(
             input_ids,

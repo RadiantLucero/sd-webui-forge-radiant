@@ -19,6 +19,21 @@ class Qwen3VL4BEngine:
 
         self.vision_block = "<|vision_start|><|image_pad|><|vision_end|>"
 
+        # Krea2 Moodboard state, set by the diffusion engine around one encode
+        self.moodboard_strength = 1.0
+        self.moodboard_extract = "style"
+        self.moodboard_hide_refs = False
+        self.moodboard_span_limit = None
+
+        # system instruction override for one encode (Krea2 Re-render: the Qwen edit instruction)
+        self.system_prompt = None
+
+    @property
+    def qwen_vl_module(self):
+        """The Qwen3VL module behind the clip wrapper (holds native_vision_inputs and last_embeds_info)."""
+        module = self.text_encoder.transformer
+        return module if hasattr(module, "build_image_inputs") else getattr(module, "transformer", module)
+
     @property
     def emphasis(self) -> "emphasis.Emphasis":
         return emphasis.EmphasisNone()
@@ -42,6 +57,7 @@ class Qwen3VL4BEngine:
             else:
                 chunk = self._tokenize_with_weights(line, images)
                 cond = self.text_encoder.encode_token_weights(chunk)[0]
+                cond = self._apply_moodboard_effects(cond)
                 tok_pairs = chunk[0]
 
                 count_im_start = 0
@@ -68,7 +84,12 @@ class Qwen3VL4BEngine:
         return zs
 
     def _tokenize_with_weights(self, text: str, images: list[torch.Tensor]) -> TOKEN_WEIGHTS:
-        llama_text = self.llama_template.format(self.vision_block * len(images) + text.strip())
+        # texts that carry their own vision blocks (Krea2 Moodboard) keep them where they are
+        blocks = "" if self.vision_block in text else self.vision_block * len(images)
+        template = self.llama_template
+        if self.system_prompt:
+            template = "<|im_start|>system\n" + self.system_prompt.replace("{", "{{").replace("}", "}}") + "<|im_end|>\n<|im_start|>user\n{}<|im_end|>\n<|im_start|>assistant\n"
+        llama_text = template.format(blocks + text.strip())
         tokens = self.tokenizer.tokenize_with_weights(llama_text, disable_weights=True)
 
         embed_count = 0
@@ -81,3 +102,45 @@ class Qwen3VL4BEngine:
                         embed_count += 1
 
         return tokens
+
+    def _apply_moodboard_effects(self, z: torch.Tensor) -> torch.Tensor:
+        """Krea2 Moodboard post-processing of the tapped hidden states (1, layers, seq, dim), before the template strip.
+
+        hide_refs drops the vision rows, so style reaches the DiT only through the prompt tokens.
+        strength < 1 with extract "style" lerps vision rows toward a mean / mean+std / mean-std cycle of the
+        joint statistics (palette, texture, mood); "subject" lerps toward whitened rows (structure stays).
+        moodboard_span_limit keeps the effects on the leading spans when edit spans follow."""
+        hide = self.moodboard_hide_refs
+        strength = float(self.moodboard_strength)
+        if not hide and strength >= 1.0:
+            return z
+
+        info = getattr(self.qwen_vl_module, "last_embeds_info", None) or []
+        spans = [(e["index"], e["index"] + e["size"]) for e in info if e.get("type") == "image"]
+        spans = [(a, b) for a, b in spans if 0 <= a < b <= z.shape[2]]
+        if self.moodboard_span_limit is not None:
+            spans = spans[: self.moodboard_span_limit]
+        if not spans:
+            return z
+
+        if hide:
+            keep = torch.ones(z.shape[2], dtype=torch.bool, device=z.device)
+            for a, b in spans:
+                keep[a:b] = False
+            return z[:, :, keep]
+
+        strength = max(0.0, strength)
+        joint = torch.cat([z[:, :, a:b] for a, b in spans], dim=2)
+        mu = joint.mean(dim=2, keepdim=True)
+        sigma = joint.std(dim=2, keepdim=True)
+        z = z.clone()
+        for a, b in spans:
+            span = z[:, :, a:b]
+            if self.moodboard_extract == "subject":
+                target = (span - mu) / sigma.clamp_min(1e-4)
+            else:
+                n = span.shape[2]
+                coef = torch.tensor([0.0, 1.0, -1.0], device=span.device, dtype=span.dtype).repeat((n + 2) // 3)[:n].view(1, 1, n, 1)
+                target = mu + coef * sigma
+            z[:, :, a:b] = target + strength * (span - target)
+        return z
