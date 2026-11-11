@@ -1,5 +1,7 @@
 from PIL import Image, ImageFilter, ImageOps
 
+from modules.img2img_alpha import composite
+
 
 def get_crop_region_v2(mask, pad=0):
     """
@@ -77,7 +79,7 @@ def expand_crop_region(crop_region, processing_width, processing_height, image_w
     return x1, y1, x2, y2
 
 
-def fill(image, mask):
+def fill(image, mask, preserve_alpha=False):
     """fills masked regions with colors from image using blur. Not extremely effective."""
 
     image_mod = Image.new('RGBA', (image.width, image.height))
@@ -92,5 +94,5 @@ def fill(image, mask):
         for _ in range(repeats):
             image_mod.alpha_composite(blurred)
 
-    return image_mod.convert("RGB")
+    return composite(image_mod, image, mask) if preserve_alpha else image_mod.convert("RGB")
 
