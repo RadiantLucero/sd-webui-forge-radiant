@@ -14,13 +14,49 @@ from PIL import Image, PngImagePlugin  # noqa: F401
 import modules.infotext_utils as parameters_copypaste
 import modules.processing_scripts.comments as comments
 import modules.shared as shared
-from modules import extra_networks, gradio_extensions, launch_utils, paths_internal, processing, progress, prompt_parser, script_callbacks, scripts, sd_models, sd_samplers, sd_schedulers, shared_items, sysinfo, timer, ui_checkpoint_merger, ui_common, ui_extensions, ui_extra_networks, ui_loadsave, ui_postprocessing, ui_settings, ui_toprow  # noqa: F401
-from modules.call_queue import wrap_gradio_call, wrap_gradio_call_no_job, wrap_gradio_gpu_call, wrap_queued_call  # noqa: F401
+from modules import (  # noqa: F401
+    extra_networks,
+    gradio_extensions,
+    launch_utils,
+    paths_internal,
+    processing,
+    progress,
+    prompt_parser,
+    script_callbacks,
+    scripts,
+    sd_models,
+    sd_samplers,
+    sd_schedulers,
+    shared_items,
+    sysinfo,
+    timer,
+    ui_checkpoint_merger,
+    ui_common,
+    ui_extensions,
+    ui_extra_networks,
+    ui_loadsave,
+    ui_postprocessing,
+    ui_settings,
+    ui_toprow,
+)
+from modules.call_queue import (  # noqa: F401
+    wrap_gradio_call,
+    wrap_gradio_call_no_job,
+    wrap_gradio_gpu_call,
+    wrap_queued_call,
+)
 from modules.infotext_utils import PasteField
 from modules.paths import script_path
 from modules.shared import cmd_opts, opts
 from modules.ui_common import create_refresh_button  # noqa: F401
-from modules.ui_components import FormGroup, FormHTML, FormRow, InputAccordion, ResizeHandleRow, ToolButton
+from modules.ui_components import (
+    FormGroup,
+    FormHTML,
+    FormRow,
+    InputAccordion,
+    ResizeHandleRow,
+    ToolButton,
+)
 from modules.ui_gradio_extensions import reload_javascript
 from modules_forge import main_entry
 from modules_forge.forge_canvas.canvas import ForgeCanvas, canvas_head
@@ -153,7 +189,7 @@ def update_token_counter(text, steps, styles, *, is_positive=True):
         get_prompt_lengths_on_ui = sd_models.model_data.sd_model.get_prompt_lengths_on_ui
         assert get_prompt_lengths_on_ui is not None
     except Exception:
-        return f"<span class='gr-box gr-text-input'>?/?</span>"
+        return "<span class='gr-box gr-text-input'>?/?</span>"
     else:
         from backend.text_processing.parsing import strip_emphasis
 
