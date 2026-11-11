@@ -3,8 +3,22 @@ import os
 import gradio as gr
 
 from backend.text_processing import emphasis as sd_emphasis
-from modules import localization, shared, shared_gradio_themes, shared_items, ui_components, util
-from modules.options import OptionDiv, OptionHTML, OptionInfo, OptionRow, categories, options_section
+from modules import (
+    localization,
+    shared,
+    shared_gradio_themes,
+    shared_items,
+    ui_components,
+    util,
+)
+from modules.options import (
+    OptionDiv,
+    OptionHTML,
+    OptionInfo,
+    OptionRow,
+    categories,
+    options_section,
+)
 from modules.paths_internal import data_path, default_output_dir
 from modules.shared_cmd_options import cmd_opts
 from modules_forge import presets as forge_presets
@@ -438,7 +452,7 @@ options_templates.update(
             "forbidden_knowledge": OptionInfo(False, "Forbidden Knowledge").info('replace "<b>DPM++ 2s a RF</b>" with "<b>Flux Realistic</b>"').needs_restart(),
             "xyz_use_cost": OptionInfo(True, "Enable the cost system for X/Y/Z Plot").info("swap expensive axis (e.g. Checkpoint) the least number of times ; may generate images out of the order specified in the UI").needs_restart(),
             "div_prompt": OptionDiv(),
-            "prompt_box_style": OptionInfo("Default", "Prompt Layout", gr.Radio, {"choices": ("Default", "Compact", "Scrollable", "Accordion")}).html(f"""
+            "prompt_box_style": OptionInfo("Default", "Prompt Layout", gr.Radio, {"choices": ("Default", "Compact", "Scrollable", "Accordion")}).html("""
 <ul style='margin-left: 1.5em'>
 <li><b>Default:</b> the original Automatic1111 layout</li>
 <li><b>Compact:</b> put Prompts inside the Generate tab, leaving more space for the Gallery</li>

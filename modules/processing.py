@@ -27,9 +27,28 @@ from backend import args, memory_management
 from backend.logging import setup_logger
 from backend.modules.k_prediction import rescale_zero_terminal_snr_sigmas
 from backend.utils import hash_tensor
-from modules import devices, errors, extra_networks, images, infotext_utils, masking, profiling, prompt_parser, rng, scripts, sd_samplers, sd_samplers_common, sd_unet, sd_vae_approx
+from modules import (
+    devices,
+    errors,
+    extra_networks,
+    images,
+    infotext_utils,
+    masking,
+    profiling,
+    prompt_parser,
+    rng,
+    scripts,
+    sd_samplers,
+    sd_samplers_common,
+    sd_unet,
+    sd_vae_approx,
+)
 from modules.sd_models import apply_token_merging, forge_model_reload
-from modules.sd_samplers_common import approximation_indexes, decode_first_stage, images_tensor_to_samples
+from modules.sd_samplers_common import (
+    approximation_indexes,
+    decode_first_stage,
+    images_tensor_to_samples,
+)
 from modules.shared import cmd_opts, opts, state
 from modules.sysinfo import set_config
 from modules.ui import sRound
