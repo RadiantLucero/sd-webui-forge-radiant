@@ -6,22 +6,23 @@ For an overview of the startup, generation, and extension paths, see [docs/archi
 
 ## Development workflow
 
-This repository is a fork of `Haoming02/sd-webui-forge-classic`. Keep `neo` as the integration branch and work on a separate branch for each change:
+This repository is a fork of `Haoming02/sd-webui-forge-classic`. Keep the local `neo` branch as a clean mirror of `upstream/neo`, and use the persistent `dev` branch for local development and commits.
 
 ```bash
-git switch neo
 git fetch upstream
+git switch neo
 git merge --ff-only upstream/neo
-git switch -c fix/short-description
+git switch dev
+git rebase neo
 ```
 
-Push your branch to your fork and open a pull request against `Haoming02/sd-webui-forge-classic:neo`:
+This updates `neo` from the original and rebases local development commits onto it. Resolve any conflicts before continuing. If `dev` has already been pushed, rebasing changes its commit history; update the fork branch with `--force-with-lease` only when that is intended.
+
+When you decide to publish, push `dev` to your fork and open a pull request directly from `RadiantLucero/sd-webui-forge-radiant:dev` to `Haoming02/sd-webui-forge-classic:neo`. No pull request within your own fork is needed.
 
 ```bash
-git push -u origin fix/short-description
+git push -u origin dev
 ```
-
-If the upstream branch has advanced while you are working, update your feature branch from `upstream/neo` before opening or updating the pull request. Do not commit directly to `neo`.
 
 ## Checks
 
