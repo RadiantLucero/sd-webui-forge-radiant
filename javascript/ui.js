@@ -147,7 +147,15 @@ function showRestoreProgressButton(tabname, show) {
     button.style.setProperty("display", show ? "flex" : "none", "important");
 }
 
+function closeGalleryPreview(tabname) {
+    const preview = gradioApp().querySelector(`#${tabname}_gallery > button.preview`);
+    if (preview) {
+        preview.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", code: "Escape", cancelable: true }));
+    }
+}
+
 function submit() {
+    closeGalleryPreview("txt2img");
     showSubmitButtons("txt2img", false);
 
     const id = randomId();
@@ -170,12 +178,14 @@ function submit() {
 }
 
 function submit_txt2img_upscale() {
+    const index = selected_gallery_index();
     const res = submit(...arguments);
-    res[2] = selected_gallery_index();
+    res[2] = index;
     return res;
 }
 
 function submit_img2img() {
+    closeGalleryPreview("img2img");
     showSubmitButtons("img2img", false);
 
     const id = randomId();
