@@ -113,23 +113,25 @@ function requestProgress(id_task, progressbarContainer, gallery, atEnd, onProgre
     let livePreview = null;
 
     let removeProgressBar = function () {
-        releaseWakeLock();
         if (!divProgress) return;
 
-        setTitle("");
-        parentProgressbar.removeChild(divProgress);
-        if (gallery && livePreview) gallery.removeChild(livePreview);
-        atEnd();
-
+        const progress = divProgress;
         divProgress = null;
+        releaseWakeLock();
+        setTitle("");
+        progress.remove();
+        if (livePreview) livePreview.remove();
+        atEnd();
     };
 
     let funProgress = function (id_task) {
+        if (!divProgress) return;
         requestWakeLock();
         request(
             "./internal/progress",
             { id_task: id_task, live_preview: false },
             function (res) {
+                if (!divProgress) return;
                 if (res.completed) {
                     removeProgressBar();
                     return;
@@ -185,6 +187,7 @@ function requestProgress(id_task, progressbarContainer, gallery, atEnd, onProgre
     };
 
     let funLivePreview = function (id_task, id_live_preview) {
+        if (!divProgress) return;
         request(
             "./internal/progress",
             { id_task: id_task, id_live_preview: id_live_preview },
@@ -196,6 +199,7 @@ function requestProgress(id_task, progressbarContainer, gallery, atEnd, onProgre
                 if (res.live_preview && gallery) {
                     let img = new Image();
                     img.onload = function () {
+                        if (!divProgress) return;
                         if (!livePreview) {
                             livePreview = document.createElement("div");
                             livePreview.className = "livePreview";

@@ -143,6 +143,8 @@ class State:
         log.info("Ending job %s (%.2f seconds)", self.job, duration)
         self.job = ""
         self.job_count = 0
+        self.current_latent = None
+        self.current_image = None
 
         devices.torch_gc()
 
