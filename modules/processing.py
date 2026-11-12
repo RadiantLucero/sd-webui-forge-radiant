@@ -1090,7 +1090,11 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
                 if alpha_mode == "Native" and image.mode != "RGBA":
                     raise RuntimeError("An img2img postprocessing extension removed the native alpha channel.")
                 if alpha_mode == "Reconstruct":
-                    image = img2img_alpha.reconstruct(image, p.alpha_references[i], p.alpha_backgrounds[i])
+                    image, calibration = img2img_alpha.reconstruct(image, p.alpha_references[i], p.alpha_backgrounds[i], p.img2img_alpha_settings)
+                    p.extra_generation_params.update(calibration.infotext())
+                    logger.info(f"img2img alpha image {i + 1}: opaque {calibration.opaque_threshold:.0f}, transparent {calibration.transparent_threshold:.0f}, color shift {calibration.color_shift:.0f}; {calibration.statistics()}")
+                    if calibration.background_level is None and calibration.original_transparent_fraction >= 0.05:
+                        logger.warning(f"img2img alpha image {i + 1}: the input was {calibration.original_transparent_fraction:.0%} transparent, but no key-colored background was found in the result.")
 
                 mask_for_overlay = getattr(p, "mask_for_overlay", None)
 
@@ -1723,6 +1727,7 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
     init_img_hash: str = field(default=None, init=False)
     mask_for_overlay: Image = field(default=None, init=False)
     init_latent: Any = field(default=None, init=True)
+    img2img_alpha_settings: Any = field(default=None, init=False)
 
     def __post_init__(self):
         super().__post_init__()
@@ -1743,12 +1748,13 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
         self.extra_generation_params["Denoising strength"] = self.denoising_strength
 
         self.image_cfg_scale: float = None
-        self.img2img_alpha_mode = opts.img2img_alpha_mode
+        if self.img2img_alpha_settings is None:
+            self.img2img_alpha_settings = img2img_alpha.AlphaSettings()
+        self.img2img_alpha_settings.validate()
+        self.img2img_alpha_mode = self.img2img_alpha_settings.mode
         self.alpha_originals = []
         self.alpha_references = []
         self.alpha_backgrounds = []
-        if self.img2img_alpha_mode not in ("Off", "Native", "Reconstruct"):
-            raise ValueError(f"Unknown img2img transparency mode: {self.img2img_alpha_mode}")
         if self.img2img_alpha_mode != "Off":
             if self.resize_mode == 3:
                 raise RuntimeError("img2img transparency does not support latent upscale.")
@@ -1867,10 +1873,11 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
 
             if self.img2img_alpha_mode != "Off":
                 self.alpha_originals.append(image.copy())
-                background = img2img_alpha.background_color(image, opts.img2img_background_color, opts.img2img_alpha_auto_background and self.img2img_alpha_mode == "Reconstruct")
+            if self.img2img_alpha_mode == "Reconstruct":
+                settings = self.img2img_alpha_settings
+                background = img2img_alpha.background_color(image, settings.key_color, settings.auto_key_color)
                 self.alpha_backgrounds.append(background)
-                if self.img2img_alpha_mode == "Reconstruct":
-                    image = images.flatten(image, background)
+                image = images.flatten(image, background)
 
             if image_mask is not None:
                 _scales = tuple(y / x for y, x in zip(_image_size, _orig_size))
@@ -1938,7 +1945,7 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
             raise RuntimeError(f"bad number of images passed: {len(imgs)}; expecting {self.batch_size} or less")
 
         if self.img2img_alpha_mode == "Reconstruct":
-            self.extra_generation_params["img2img alpha background"] = ", ".join("#%02x%02x%02x" % color for color in self.alpha_backgrounds)
+            self.extra_generation_params["img2img alpha background"] = ", ".join(img2img_alpha.format_color(color) for color in self.alpha_backgrounds)
 
         image = torch.from_numpy(batch_images)
         image = image.to(shared.device, dtype=torch.float32)

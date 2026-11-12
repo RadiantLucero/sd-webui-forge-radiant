@@ -324,8 +324,6 @@ options_templates.update(
             "img2img_color_correction": OptionInfo(False, "Apply color correction to img2img results to match original colors"),
             "img2img_fix_steps": OptionInfo(False, "During img2img, do exactly the number of Steps the slider specifies").info("otherwise, only process <b>Sampling steps</b> x <b>Denoising strength</b> steps"),
             "img2img_background_color": OptionInfo("#808080", "For img2img, fill the transparent parts of the input image with this color", ui_components.FormColorPicker, {}),
-            "img2img_alpha_mode": OptionInfo("Off", "img2img transparency", gr.Dropdown, {"choices": ["Off", "Native", "Reconstruct"]}).info("Native requires an RGBA-capable VAE; reconstruction estimates transparency from the RGB result"),
-            "img2img_alpha_auto_background": OptionInfo(False, "Automatically choose the img2img transparency background").info("only used for alpha reconstruction"),
             "img2img_sketch_default_brush_color": OptionInfo("#ff0000", "Initial Brush Color for Sketch", ui_components.FormColorPicker, {}).needs_reload_ui(),
             "img2img_inpaint_mask_brush_color": OptionInfo("#808080", "Brush Color for Inpaint Mask", ui_components.FormColorPicker, {}).needs_reload_ui(),
             "img2img_inpaint_sketch_default_brush_color": OptionInfo("#ff0000", "Initial Brush Color for Inpaint Sketch", ui_components.FormColorPicker, {}).needs_reload_ui(),

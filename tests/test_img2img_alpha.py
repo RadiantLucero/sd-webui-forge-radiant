@@ -1,15 +1,37 @@
 import unittest
 from types import SimpleNamespace
 
+import numpy as np
 from PIL import Image
 
 from modules.img2img_alpha import (
+    AlphaSettings,
+    ChromaKey,
     background_color,
     composite,
     reconstruct,
     validate_native_vae,
 )
 from modules.masking import fill
+
+GREEN = (0, 255, 0)
+KEY = (20, 230, 15)
+SUBJECT = (190, 140, 110)
+
+
+def scene(width=32, height=16):
+    """Subject on the left half, transparent right half, and the matching generated RGB result."""
+    source = np.zeros((height, width, 4), np.uint8)
+    source[:, : width // 2] = (*SUBJECT, 255)
+    rendered = np.empty((height, width, 3), np.uint8)
+    rendered[:] = KEY
+    rendered[:, : width // 2] = SUBJECT
+    return source, rendered
+
+
+def run(source, rendered, **settings):
+    result, calibration = reconstruct(Image.fromarray(rendered, "RGB"), Image.fromarray(source, "RGBA"), GREEN, AlphaSettings(mode="Reconstruct", **settings))
+    return np.asarray(result).astype(int), calibration
 
 
 class Img2ImgAlphaTests(unittest.TestCase):
@@ -37,62 +59,60 @@ class Img2ImgAlphaTests(unittest.TestCase):
         vae.output_channels = 4
         validate_native_vae(vae)
 
-    def test_unchanged_original_alpha_and_green_object_are_preserved(self):
-        source = Image.new("RGBA", (2, 1))
-        source.putdata([(200, 50, 40, 128), (0, 255, 0, 255)])
-        rendered = Image.new("RGB", (2, 1))
-        rendered.putdata([(100, 152, 20), (0, 255, 0)])
-        result = reconstruct(rendered, source, (0, 255, 0))
-        self.assertEqual(result.tobytes(), source.tobytes())
+    def test_new_content_on_former_background_stays_opaque_and_unchanged(self):
+        source, rendered = scene()
+        rendered[2:6, 20:24] = (120, 120, 120)
+        rendered[8:12, 20:24] = (180, 120, 100)
+        result, _ = run(source, rendered)
+        self.assertTrue((result[2:6, 20:24] == (120, 120, 120, 255)).all())
+        self.assertTrue((result[8:12, 20:24] == (180, 120, 100, 255)).all())
+        self.assertTrue((result[:, :16] == (*SUBJECT, 255)).all())
+        self.assertTrue((result[:, 28:, 3] == 0).all())
 
-    def test_reconstructs_color_over_arbitrary_background(self):
-        source = Image.new("RGBA", (1, 1), (0, 0, 0, 0))
-        rendered = Image.new("RGB", (1, 1), (128, 64, 64))
-        result = reconstruct(rendered, source, (0, 128, 128))
-        r, g, b, alpha = result.getpixel((0, 0))
-        self.assertEqual(r, 255)
-        self.assertLessEqual(max(g, b), 1)
-        self.assertEqual(alpha, 128)
+    def test_key_mixed_edge_is_translucent_and_despilled_without_magenta(self):
+        source, rendered = scene()
+        rendered[:, 16] = np.round((np.array(SUBJECT) + np.array(KEY)) / 2)
+        result, _ = run(source, rendered)
+        edge = result[:, 16]
+        self.assertTrue(((edge[:, 3] > 0) & (edge[:, 3] < 255)).all())
+        self.assertTrue((ChromaKey(GREEN).strength(edge[:, :3]) < 30).all())
+        self.assertTrue((edge[:, 1] >= np.minimum(edge[:, 0], edge[:, 2])).all())
 
-    def test_reconstruction_uses_original_color_to_avoid_saturation(self):
-        source = Image.new("RGBA", (1, 1), (200, 50, 40, 128))
-        target = Image.new("RGBA", (1, 1), (220, 50, 40, 128))
-        for background in ((0, 255, 0), (0, 255, 255), (128, 128, 128)):
-            with self.subTest(background=background):
-                rendered = Image.alpha_composite(Image.new("RGBA", (1, 1), background), target).convert("RGB")
-                result = reconstruct(rendered, source, background)
-                for actual, expected in zip(result.getpixel((0, 0)), target.getpixel((0, 0))):
-                    self.assertLessEqual(abs(actual - expected), 3)
+    def test_tinted_result_stays_opaque(self):
+        source, rendered = scene()
+        rendered[:, :16] = (150, 170, 140)
+        result, calibration = run(source, rendered)
+        self.assertEqual(calibration.tint, 70)
+        self.assertGreater(calibration.opaque_threshold, 20)
+        self.assertTrue((result[:, :16] == (150, 170, 140, 255)).all())
 
-    def test_small_edits_to_semitransparent_pixels_are_not_discarded(self):
-        source = Image.new("RGBA", (1, 1), (200, 50, 40, 128))
-        target = Image.new("RGBA", (1, 1), (208, 50, 40, 128))
-        background = (0, 255, 0)
-        rendered = Image.alpha_composite(Image.new("RGBA", (1, 1), background), target).convert("RGB")
-        result = reconstruct(rendered, source, background)
-        self.assertGreater(result.getpixel((0, 0))[0], source.getpixel((0, 0))[0])
+    def test_manual_thresholds_and_shift_override_calibration(self):
+        source, rendered = scene()
+        rendered[:, 16] = (65, 195, 50)
+        result, calibration = run(source, rendered, opaque_threshold=100, transparent_threshold=150, color_shift=0)
+        self.assertEqual((calibration.opaque_threshold, calibration.transparent_threshold, calibration.color_shift), (100, 150, 0))
+        self.assertEqual(calibration.infotext()["img2img alpha opaque"], "100")
+        self.assertTrue((result[:, 16] == (65, 195, 50, 102)).all())
 
-    def test_reconstruction_can_detect_changed_alpha(self):
-        source = Image.new("RGBA", (1, 1), (200, 50, 40, 128))
-        target = Image.new("RGBA", (1, 1), (200, 50, 40, 64))
-        background = (0, 255, 0)
-        rendered = Image.alpha_composite(Image.new("RGBA", (1, 1), background), target).convert("RGB")
-        result = reconstruct(rendered, source, background)
-        for actual, expected in zip(result.getpixel((0, 0)), target.getpixel((0, 0))):
-            self.assertLessEqual(abs(actual - expected), 3)
+    def test_original_alpha_contributes_only_statistics(self):
+        source, rendered = scene()
+        rendered[:, 16] = (100, 190, 60)
+        shuffled = source.reshape(-1, 4).copy()
+        np.random.default_rng(1).shuffle(shuffled)
+        first, _ = run(source, rendered)
+        second, _ = run(shuffled.reshape(source.shape), rendered)
+        self.assertTrue((first == second).all())
 
-    def test_reconstruction_does_not_replace_strongly_edited_colors(self):
-        source = Image.new("RGBA", (1, 1), (200, 50, 40, 128))
-        rendered = Image.new("RGB", (1, 1), (10, 227, 95))
-        result = reconstruct(rendered, source, (0, 255, 0))
-        recomposited = Image.alpha_composite(Image.new("RGBA", (1, 1), (0, 255, 0)), result).convert("RGB")
-        for actual, expected in zip(recomposited.getpixel((0, 0)), rendered.getpixel((0, 0))):
-            self.assertLessEqual(abs(actual - expected), 1)
-
-    def test_edited_opaque_source_is_not_made_translucent(self):
-        source = Image.new("RGBA", (1, 1), (100, 100, 100, 255))
-        rendered = Image.new("RGB", (1, 1), (200, 150, 130))
-        self.assertEqual(reconstruct(rendered, source, (128, 128, 128)).getpixel((0, 0)), (200, 150, 130, 255))
+    def test_invalid_settings_are_rejected(self):
+        for settings in (
+            AlphaSettings(mode="Reconstruct", key_color="#808080"),
+            AlphaSettings(mode="Reconstruct", key_color="#ffffff"),
+            AlphaSettings(mode="Reconstruct", opaque_threshold=120, transparent_threshold=120),
+            AlphaSettings(mode="Invalid"),
+        ):
+            with self.subTest(settings=settings), self.assertRaises(ValueError):
+                settings.validate()
+        AlphaSettings(mode="Native", key_color="#808080").validate()
 
     def test_inpaint_mask_preserves_original_and_blends_alpha(self):
         original = Image.new("RGBA", (3, 1), (255, 0, 0, 128))
@@ -104,11 +124,13 @@ class Img2ImgAlphaTests(unittest.TestCase):
         self.assertEqual(result.getpixel((2, 0)), (0, 0, 255, 255))
         self.assertEqual(result.getpixel((1, 0)), (85, 0, 170, 192))
 
-    def test_automatic_background_ignores_fully_transparent_pixels(self):
+    def test_automatic_key_color_avoids_visible_colors(self):
         source = Image.new("RGBA", (2, 1))
-        source.putdata([(0, 0, 0, 255), (255, 255, 255, 0)])
-        self.assertEqual(background_color(source, "#808080", True), (255, 255, 255))
-        self.assertEqual(background_color(source, "#123456", False), (18, 52, 86))
+        source.putdata([(30, 220, 40, 255), (255, 0, 255, 0)])
+        self.assertEqual(background_color(source, "#00ff00", True), (255, 0, 255))
+        self.assertEqual(background_color(source, "#0000ff", False), (0, 0, 255))
+        with self.assertRaisesRegex(ValueError, "saturated key color"):
+            background_color(source, "#808080", False)
 
     def test_mismatched_images_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "matching image sizes"):
