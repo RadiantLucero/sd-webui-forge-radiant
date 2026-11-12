@@ -6,7 +6,11 @@ from PIL import Image
 from backend.args import dynamic_args
 from modules import images, scripts, sd_models
 from modules.api import api
-from modules.processing import StableDiffusionProcessing, StableDiffusionProcessingTxt2Img, logger
+from modules.processing import (
+    StableDiffusionProcessing,
+    StableDiffusionProcessingTxt2Img,
+    logger,
+)
 from modules.sd_samplers_common import images_tensor_to_samples
 from modules.shared import device, opts
 from modules.ui_components import FormRow, InputAccordion
@@ -28,7 +32,7 @@ For <b>Wan 2.2 I2V</b>: Use in <b>img2img</b> to set as the Last Frame to achiev
 
 class ImageStitch(scripts.Script):
     sorting_priority = 529
-    cached_parameters: tuple[int | bool | str] = None
+    cached_parameters: tuple[object, ...] | None = None
 
     def title(self):
         return "ImageStitch Integrated"
@@ -146,9 +150,10 @@ class ImageStitch(scripts.Script):
         p.sd_model.clear_references()
 
     def process(self, p: StableDiffusionProcessing, enable: bool, references: list[str | tuple[Image.Image, str]]):
-        references: list[Image.Image] = []
         if enable and references and dynamic_args.can_reference():
             references = self.extract_images(references)
+        else:
+            references = []
 
         is_WanT2I: bool = dynamic_args.wan and isinstance(p, StableDiffusionProcessingTxt2Img)
 
@@ -160,9 +165,9 @@ class ImageStitch(scripts.Script):
             return
 
         self.reset_references(p)
-        ImageStitch.cached_parameters = cache
 
         if not references:
+            ImageStitch.cached_parameters = None
             return
 
         if dynamic_args.wan:
@@ -189,6 +194,8 @@ class ImageStitch(scripts.Script):
                     images_tensor_to_samples(image.to(device=device), 0, p.sd_model)
         finally:
             dynamic_args.is_referencing = False
+
+        ImageStitch.cached_parameters = cache
 
     @staticmethod
     def extract_images(gallery: list[str | tuple[Image.Image, str]]) -> list[Image.Image]:

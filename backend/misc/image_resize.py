@@ -10,10 +10,10 @@ def resize_reference(samples: torch.Tensor, multiple: int = 16, resolution: int 
 
     height, width = samples.shape[-2:]
 
-    scale = min(
-        (val / math.sqrt(width * height) for val in (resolution, opts.reference_max_side) if val > 0),
-        default=1.0,
-    )
+    scale = resolution / math.sqrt(width * height) if resolution > 0 else 1.0
+    if opts.reference_max_side > 0:
+        max_side = opts.reference_max_side // multiple * multiple
+        scale = min(scale, max_side / max(height, width))
 
     size = tuple(max(multiple, round(side * scale / multiple) * multiple) for side in (height, width))
     if size == (height, width):

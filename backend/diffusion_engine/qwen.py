@@ -14,7 +14,6 @@ from backend.patcher.clip import CLIP
 from backend.patcher.unet import UnetPatcher
 from backend.patcher.vae import VAE
 from backend.text_processing.qwen_image_engine import Qwen25VL7BEngine
-from modules.shared import opts
 
 
 class QwenImage(ForgeDiffusionEngine):
