@@ -1,7 +1,7 @@
 """Alpha handling for img2img inputs and outputs."""
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 from PIL import Image, ImageColor
@@ -35,6 +35,7 @@ MIN_PARTIAL_BAND = 32
 VISIBLE_ALPHA = 242
 TRANSPARENT_ALPHA = 12
 FOREGROUND_SAMPLE = 0.9
+MAX_ISLAND_RADIUS = 64
 _SMOOTHING = np.exp(-0.5 * (np.arange(-9, 10) / 3.0) ** 2)
 _SMOOTHING /= _SMOOTHING.sum()
 
@@ -49,6 +50,10 @@ class AlphaSettings:
     opaque_threshold: float | None = None
     transparent_threshold: float | None = None
     color_shift: float | None = None
+    island_check: bool = False
+    island_threshold: float | None = None
+    island_radius: int = 4
+    island_share: float = 0.7
 
     def validate(self):
         if self.mode not in MODES:
@@ -63,6 +68,13 @@ class AlphaSettings:
             raise ValueError("The img2img transparency opaque threshold must be at most 254.")
         if self.opaque_threshold is not None and self.transparent_threshold is not None and self.opaque_threshold >= self.transparent_threshold:
             raise ValueError("The img2img transparency opaque threshold must be lower than the transparent threshold.")
+        if self.island_check:
+            if self.island_threshold is not None and not 0 <= self.island_threshold <= 254:
+                raise ValueError("The img2img transparency island threshold must be between 0 and 254.")
+            if self.island_radius != int(self.island_radius) or not 1 <= self.island_radius <= MAX_ISLAND_RADIUS:
+                raise ValueError(f"The img2img transparency island radius must be a whole number between 1 and {MAX_ISLAND_RADIUS}.")
+            if not 0 < self.island_share <= 1:
+                raise ValueError("The img2img transparency island share must be above 0% and at most 100%.")
         ChromaKey(ImageColor.getrgb(self.key_color))
 
 
@@ -84,24 +96,36 @@ class Calibration:
     tint: float
     original_transparent_fraction: float
     background_fraction: float
+    # None when the island check is off.
+    island_threshold: float | None = None
+    auto_island: bool = False
+    island_radius: int = 0
+    island_share: float = 0.0
+    island_pixels: int = 0
 
     def infotext(self):
         def value(number, automatic):
             return f"{number:.0f} auto" if automatic else f"{number:.0f}"
 
-        return {
+        info = {
             "img2img alpha opaque": value(self.opaque_threshold, self.auto_opaque),
             "img2img alpha transparent": value(self.transparent_threshold, self.auto_transparent),
             "img2img alpha color shift": value(self.color_shift, self.auto_color_shift),
-            "img2img alpha statistics": self.statistics(),
         }
+        if self.island_threshold is not None:
+            info["img2img alpha island"] = value(self.island_threshold, self.auto_island)
+            info["img2img alpha island radius"] = str(self.island_radius)
+            info["img2img alpha island share"] = f"{self.island_share:.0%}"
+        info["img2img alpha statistics"] = self.statistics()
+        return info
 
     def statistics(self):
         background = "none" if self.background_level is None else f"{format_color(np.round(self.background_color).astype(int))} {self.background_level:.0f} +/- {self.background_spread:.0f}"
         original = "none" if self.original_level is None else f"{self.original_level:.0f}"
+        islands = "" if self.island_threshold is None else f"; island pixels {self.island_pixels} above {self.island_threshold:.0f}"
         return (
             f"background {background}; foreground {self.foreground_level:.0f}; original {original}; tint {self.tint:.0f}; "
-            f"transparent area {self.original_transparent_fraction:.0%} -> {self.background_fraction:.0%}"
+            f"transparent area {self.original_transparent_fraction:.0%} -> {self.background_fraction:.0%}{islands}"
         )
 
 
@@ -145,6 +169,21 @@ def background_color(image, configured_color, automatic):
 
 def _spread(values, center):
     return 1.4826 * float(np.median(np.abs(values - center))) if values.size else 0.0
+
+
+def _surrounded(mask, radius, share):
+    """Whether at least ``share`` of the other pixels within ``radius`` (a square, clipped at the border) are set in ``mask``."""
+
+    def window_sum(values):
+        padded = np.pad(values.astype(np.int64), ((radius + 1, radius), (radius + 1, radius)))
+        integral = padded.cumsum(axis=0).cumsum(axis=1)
+        size = 2 * radius + 1
+        return integral[size:, size:] - integral[:-size, size:] - integral[size:, :-size] + integral[:-size, :-size]
+
+    mask = np.asarray(mask, dtype=bool)
+    neighbors = window_sum(np.ones(mask.shape, dtype=bool)) - 1
+    hits = window_sum(mask) - mask
+    return (neighbors > 0) & (hits >= share * neighbors)
 
 
 def calibrate(key, rgb, strength, original, settings):
@@ -213,6 +252,11 @@ def calibrate(key, rgb, strength, original, settings):
     auto_shift = float(max(round(float(key.strength(background_rgb))), 1))
     shift = auto_shift if settings.color_shift is None else float(settings.color_shift)
 
+    island = None
+    if settings.island_check:
+        # Inside transparent surroundings the context replaces the noise margin; keep the subject's own key lean opaque.
+        island = float(np.clip(round(upper), 0.0, opaque)) if settings.island_threshold is None else float(settings.island_threshold)
+
     return Calibration(
         opaque_threshold=opaque,
         transparent_threshold=transparent,
@@ -228,6 +272,10 @@ def calibrate(key, rgb, strength, original, settings):
         tint=tint,
         original_transparent_fraction=transparent_fraction,
         background_fraction=float(np.mean(values >= transparent)) if values.size else 0.0,
+        island_threshold=island,
+        auto_island=settings.island_threshold is None,
+        island_radius=int(settings.island_radius),
+        island_share=float(settings.island_share),
     )
 
 
@@ -246,6 +294,10 @@ def reconstruct(image, reference, background, settings=None):
     calibration = calibrate(key, rgb, strength, np.asarray(reference.convert("RGBA"), dtype=np.float32), settings)
 
     opaque = strength <= calibration.opaque_threshold
+    if calibration.island_threshold is not None:
+        islands = opaque & (strength > calibration.island_threshold) & _surrounded(~opaque, calibration.island_radius, calibration.island_share)
+        opaque &= ~islands
+        calibration = replace(calibration, island_pixels=int(np.count_nonzero(islands)))
     # Like a green-screen key, alpha falls with key dominance and reaches zero at the color shift (the measured background by default).
     alpha = np.clip(1.0 - strength / max(calibration.color_shift, 1.0), 0.0, 1.0)
     alpha = np.where(opaque, 1.0, np.where(strength >= calibration.transparent_threshold, 0.0, alpha))
