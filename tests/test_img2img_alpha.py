@@ -90,10 +90,34 @@ class Img2ImgAlphaTests(unittest.TestCase):
     def test_manual_thresholds_and_shift_override_calibration(self):
         source, rendered = scene()
         rendered[:, 16] = (65, 195, 50)
-        result, calibration = run(source, rendered, opaque_threshold=100, transparent_threshold=150, color_shift=0)
-        self.assertEqual((calibration.opaque_threshold, calibration.transparent_threshold, calibration.color_shift), (100, 150, 0))
+        result, calibration = run(source, rendered, opaque_threshold=100, transparent_threshold=150, color_shift=200)
+        self.assertEqual((calibration.opaque_threshold, calibration.transparent_threshold, calibration.color_shift), (100, 150, 200))
         self.assertEqual(calibration.infotext()["img2img alpha opaque"], "100")
-        self.assertTrue((result[:, 16] == (65, 195, 50, 102)).all())
+        # Dominance 130 of 200 leaves alpha 0.35; the rendered key share is removed from the color.
+        self.assertTrue((result[:, 16] == (149, 130, 115, 89)).all())
+
+    def test_translucent_areas_are_unmixed_with_auto_thresholds(self):
+        source = np.zeros((24, 64, 4), np.uint8)
+        source[:, :16] = (*SUBJECT, 255)
+        rendered = np.empty((24, 64, 3), np.uint8)
+        rendered[:] = KEY
+        rendered[:, :16] = SUBJECT
+        # Uniform translucent bands outnumber both the opaque subject and the background.
+        bands = (((235, 235, 235), 0.75), ((235, 235, 235), 0.5), ((50, 50, 60), 0.25))
+        for index, (color, alpha) in enumerate(bands):
+            rows = slice(index * 8, index * 8 + 8)
+            source[rows, 16:56] = (*color, round(alpha * 255))
+            rendered[rows, 16:56] = np.round(alpha * np.array(color) + (1 - alpha) * np.array(KEY))
+        result, calibration = run(source, rendered)
+        self.assertLess(calibration.opaque_threshold, 30)
+        self.assertEqual(calibration.background_color, KEY)
+        for index, (color, alpha) in enumerate(bands):
+            with self.subTest(color=color, alpha=alpha):
+                pixels = result[index * 8 : index * 8 + 8, 16:56].reshape(-1, 4)
+                self.assertTrue((np.abs(pixels[:, 3] - alpha * 255) <= 10).all())
+                coverage = pixels[:, 3:] / 255
+                over_white = pixels[:, :3] * coverage + 255 * (1 - coverage)
+                self.assertTrue((np.abs(over_white - (alpha * np.array(color) + (1 - alpha) * 255)) <= 8).all())
 
     def test_original_alpha_contributes_only_statistics(self):
         source, rendered = scene()

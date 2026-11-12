@@ -7,7 +7,7 @@ from modules.infotext_utils import PasteField, parse_generation_parameters
 from modules.ui_components import FormColorPicker, InputAccordion
 
 THRESHOLD_KEYS = (
-    ("opaque", "img2img alpha opaque", "Opaque up to"),
+    ("opaque", "img2img alpha opaque", "Partial above"),
     ("transparent", "img2img alpha transparent", "Transparent from"),
     ("shift", "img2img alpha color shift", "Color shift"),
 )
@@ -78,7 +78,7 @@ class ScriptImg2imgTransparency(scripts.Script):
             )
 
             with gr.Column(visible=True) as reconstruct_controls:
-                gr.Markdown("Thresholds use key strength: 0 is a neutral color and 255 is the pure key color. For green this is G - max(R, B). Auto values are calculated for every image from the result and the color statistics of the input.")
+                gr.Markdown("Thresholds use key dominance: how far the key color's channels exceed the others, from 0 for a neutral color to 255 for the pure key color. For green this is G - max(R, B). Partially transparent pixels are unmixed from the background color measured in the result. Auto values are calculated for every image from the result and the color statistics of the input.")
                 with gr.Row():
                     key_color = FormColorPicker(label="Key color", value=img2img_alpha.DEFAULT_KEY_COLOR, elem_id=self.elem_id("key_color"))
                     auto_key = gr.Checkbox(label="Auto key color", value=False, elem_id=self.elem_id("auto_key"), info="choose the saturated color least present in the visible input")
@@ -86,9 +86,9 @@ class ScriptImg2imgTransparency(scripts.Script):
                 sliders = {}
                 autos = {}
                 for name, minimum, maximum, value, label, info in (
-                    ("opaque", 0, 254, 40, "Opaque up to key strength", "pixels at or below this value stay fully opaque and unchanged"),
-                    ("transparent", 1, 255, 200, "Transparent from key strength", "pixels at or above this value become fully transparent"),
-                    ("shift", 0, 255, 180, "Color shift", "key color removed from partially transparent pixels"),
+                    ("opaque", 0, 254, 40, "Partial transparency above key dominance", "pixels at or below this value stay fully opaque and unchanged"),
+                    ("transparent", 1, 255, 200, "Transparent from key dominance", "pixels at or above this value become fully transparent"),
+                    ("shift", 1, 255, 180, "Color shift", "key dominance of a fully transparent pixel when unmixing; lower values give more transparent edges tinted away from the key, higher values more opaque edges tinted toward it"),
                 ):
                     with gr.Row(equal_height=True):
                         autos[name] = gr.Checkbox(label="Auto", value=True, elem_id=self.elem_id(f"{name}_auto"), scale=0, min_width=80)
