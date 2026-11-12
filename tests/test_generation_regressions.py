@@ -2,6 +2,8 @@ import ast
 import json
 import math
 import re
+import shutil
+import subprocess
 import tempfile
 import unittest
 from abc import abstractmethod
@@ -247,12 +249,30 @@ class TransparencyCallbackTests(unittest.TestCase):
 
     def invoke(self, binding, index, settings=()):
         gallery = self.script.gallery.postprocess(self.gallery)
-        # The final number is supplied by selected_gallery_index() in the browser.
+        # The final number is supplied by the gallery-selection JavaScript in the browser.
         inputs = [json.dumps(self.info), gallery, *settings, index]
         values = [component.preprocess(value) for component, value in zip(binding["inputs"], inputs, strict=True)]
         for image, _ in values[1]:
             image.load()
         return binding["fn"](*values)
+
+    @unittest.skipUnless(shutil.which("node"), "JavaScript callback tests require Node.js")
+    def test_javascript_ignores_trailing_gradio_event_data(self):
+        for binding in (self.reconstruct, self.save):
+            with self.subTest(callback=binding["fn"].__name__):
+                values = list(range(len(binding["inputs"])))
+                script = f"""
+                    function selected_gallery_index_id(id) {{
+                        if (id !== "img2img_gallery") throw new Error("Wrong gallery");
+                        return 3;
+                    }}
+                    const transform = {binding["_js"]};
+                    const values = {json.dumps(values)};
+                    console.log(JSON.stringify([transform(...values), transform(...values, null)]));
+                """
+                result = subprocess.run(["node", "-e", script], check=True, capture_output=True, text=True, timeout=10)
+                expected = values[:-1] + [3]
+                self.assertEqual(json.loads(result.stdout), [expected, expected])
 
     def test_reconstruct_and_save_use_preprocessed_gallery_selection(self):
         for index, raw_index in ((1, 0), (4, 1)):
@@ -272,14 +292,30 @@ class TransparencyCallbackTests(unittest.TestCase):
         self.info["infotexts"] = ["Steps: 1, Seed: 1"]
         self.info["extra_generation_params"][self.scope["RECONSTRUCTION_CACHE_INDICES_KEY"]] = {"0": 0}
         self.gallery = [(self.raw[0], None)]
-        _, info, _, _ = self.invoke(self.reconstruct, 0, self.settings)
-        self.assertIn("img2img alpha opaque: 40", json.loads(info)["infotexts"][0])
-        self.invoke(self.save, 0)
+        for index in (0, -1):
+            with self.subTest(index=index):
+                gallery_update, info, _, _ = self.invoke(self.reconstruct, index, self.settings)
+                self.assertEqual(gallery_update["selected_index"], 0)
+                self.assertIn("img2img alpha opaque: 40", json.loads(info)["infotexts"][0])
+                self.invoke(self.save, index)
+                with Image.open(self.saved_path) as saved:
+                    self.assertEqual(saved.tobytes(), self.raw[0].tobytes())
+
+    def test_unselected_single_output_among_grid_and_mask(self):
+        self.info["infotexts"] = self.info["infotexts"][:2]
+        self.info["extra_generation_params"][self.scope["RECONSTRUCTION_CACHE_INDICES_KEY"]] = {"1": 0}
+        self.gallery = self.gallery[:3]
+        gallery_update, info, _, _ = self.invoke(self.reconstruct, -1, self.settings)
+        self.assertEqual(gallery_update["selected_index"], 1)
+        self.assertEqual(gallery_update["value"][0][0].mode, "RGB")
+        self.assertEqual(gallery_update["value"][1][0].mode, "RGBA")
+        self.assertIn("img2img alpha opaque: 40", json.loads(info)["infotexts"][1])
+        self.invoke(self.save, -1)
         with Image.open(self.saved_path) as saved:
             self.assertEqual(saved.tobytes(), self.raw[0].tobytes())
 
     def test_grid_and_mask_are_not_treated_as_generated_images(self):
-        for index in (0, 2):
+        for index in (-1, 0, 2):
             for binding, settings in ((self.reconstruct, self.settings), (self.save, ())):
                 with self.subTest(index=index, callback=binding["fn"].__name__):
                     with self.assertRaisesRegex(gr.Error, "Select a generated image"):

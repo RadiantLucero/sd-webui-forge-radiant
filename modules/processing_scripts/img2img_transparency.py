@@ -275,16 +275,17 @@ class ScriptImg2imgTransparency(scripts.Script):
             ],
             show_progress="hidden",
         )
+        reconstruct_inputs = [generation_info, self.gallery] + self.reconstruction_inputs
         self.reconstruct_button.click(
             fn=self.reconstruct_selected,
-            _js="(...args) => [...args.slice(0, -1), selected_gallery_index()]",
-            inputs=[generation_info, self.gallery] + self.reconstruction_inputs + [self.infotext],
+            _js=f"(...args) => [...args.slice(0, {len(reconstruct_inputs)}), selected_gallery_index_id('img2img_gallery')]",
+            inputs=reconstruct_inputs + [self.infotext],
             outputs=[self.gallery, generation_info, self.infotext, self.cache_status],
             show_progress="hidden",
         )
         self.save_original_button.click(
             fn=self.save_original,
-            _js="(info, gallery, _) => [info, gallery, selected_gallery_index()]",
+            _js="(info, gallery, _) => [info, gallery, selected_gallery_index_id('img2img_gallery')]",
             inputs=[generation_info, self.gallery, self.infotext],
             outputs=[self.cache_status],
             show_progress="hidden",
@@ -301,8 +302,11 @@ class ScriptImg2imgTransparency(scripts.Script):
         if cache_data is None:
             raise gr.Error("The raw generated image is no longer available in the reconstruction cache.")
         info, token, indices = cache_data
+        # A single generated result is unambiguous before the gallery preview is opened.
+        if gallery_index == -1 and len(indices) == 1:
+            gallery_index = int(next(iter(indices)))
         if not isinstance(gallery_index, int) or str(gallery_index) not in indices:
-            raise gr.Error("Select a generated image that has a cached raw image.")
+            raise gr.Error("Select a generated image in the img2img gallery first (not a grid or mask).")
         try:
             cache_index = int(indices[str(gallery_index)])
             cached = RECONSTRUCTION_CACHE.get(token, cache_index)
@@ -311,7 +315,7 @@ class ScriptImg2imgTransparency(scripts.Script):
         infotext_index = info.get("index_of_first_image", 0) + cache_index
         if infotext_index >= len(info.get("infotexts", [])):
             raise gr.Error("Generation information for the selected image is unavailable.")
-        return info, cached, infotext_index
+        return info, cached, infotext_index, gallery_index
 
     def reconstruct_selected(
         self,
@@ -333,7 +337,7 @@ class ScriptImg2imgTransparency(scripts.Script):
         island_smoke,
         gallery_index,
     ):
-        info, cached, infotext_index = self.get_cached_source(generation_info, gallery_index)
+        info, cached, infotext_index, gallery_index = self.get_cached_source(generation_info, gallery_index)
         settings = img2img_alpha.AlphaSettings(
             mode="Reconstruct",
             key_color=key_color or img2img_alpha.DEFAULT_KEY_COLOR,
@@ -380,7 +384,7 @@ class ScriptImg2imgTransparency(scripts.Script):
         )
 
     def save_original(self, generation_info, gallery, gallery_index):
-        info, cached, infotext_index = self.get_cached_source(generation_info, gallery_index)
+        info, cached, infotext_index, _ = self.get_cached_source(generation_info, gallery_index)
         infotext = info["infotexts"][infotext_index]
         params = parse_generation_parameters(infotext)
         raw_info = replace_infotext_values(infotext, {"img2img alpha output": "raw before reconstruction"})
