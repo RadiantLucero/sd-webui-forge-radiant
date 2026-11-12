@@ -51,14 +51,17 @@ class AlphaSettings:
     def validate(self):
         if self.mode not in MODES:
             raise ValueError(f"Unknown img2img transparency mode: {self.mode}")
+        if self.mode != "Reconstruct":
+            return
         for name in ("opaque_threshold", "transparent_threshold", "color_shift"):
             value = getattr(self, name)
             if value is not None and not 0 <= value <= 255:
                 raise ValueError(f"img2img transparency {name.replace('_', ' ')} must be between 0 and 255.")
+        if self.opaque_threshold is not None and self.opaque_threshold > 254:
+            raise ValueError("The img2img transparency opaque threshold must be at most 254.")
         if self.opaque_threshold is not None and self.transparent_threshold is not None and self.opaque_threshold >= self.transparent_threshold:
             raise ValueError("The img2img transparency opaque threshold must be lower than the transparent threshold.")
-        if self.mode == "Reconstruct":
-            ChromaKey(ImageColor.getrgb(self.key_color))
+        ChromaKey(ImageColor.getrgb(self.key_color))
 
 
 @dataclass(frozen=True)
@@ -143,7 +146,9 @@ def _spread(values, center):
 
 def calibrate(strength, original_strength, original_transparent_fraction, settings):
     """Derive thresholds from the generated key-strength histogram and global original statistics."""
-    values = np.asarray(strength, dtype=np.float32).ravel()
+    settings.validate()
+    # Use the same upper bound for the histogram and its samples when the result exceeds the key's saturation.
+    values = np.minimum(np.asarray(strength, dtype=np.float32).ravel(), 255.0)
     original_strength = np.asarray(original_strength, dtype=np.float32).ravel()
 
     background_level = background_spread = None

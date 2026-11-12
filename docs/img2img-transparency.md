@@ -38,6 +38,12 @@ negative.
   proportion to their transparency. Despill never pushes a color past neutral,
   so it cannot create the complementary tint, such as magenta for green.
 
+*Opaque up to* ranges from 0 to 254 and must stay below *Transparent from*
+(1 to 255). Invalid manual pairs produce an explicit error. Reconstruction
+settings are ignored when transparency is disabled or **Native** is selected.
+Results more saturated than the configured key use the top histogram bin for
+calibration, keeping Auto values within the slider range.
+
 Each value has an **Auto** checkbox. Auto values are calculated per image:
 
 - The generated image's key-strength histogram locates the background peak.
@@ -45,7 +51,8 @@ Each value has an **Auto** checkbox. Auto values are calculated per image:
 - The visible original pixels give the expected subject strength. The shift of
   the generated subject relative to the original is reported as `tint`.
   *Opaque up to* is the original's 99th percentile plus the tint and a noise
-  margin, and stays at least 32 below *Transparent from*.
+  margin, and normally stays at least 32 below *Transparent from* (a manually
+  selected transparent threshold below 32 leaves a narrower band).
 - *Color shift* is the distance between the background peak and the
   generated subject.
 

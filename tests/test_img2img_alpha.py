@@ -1,4 +1,5 @@
 import unittest
+import warnings
 from types import SimpleNamespace
 
 import numpy as np
@@ -108,11 +109,43 @@ class Img2ImgAlphaTests(unittest.TestCase):
             AlphaSettings(mode="Reconstruct", key_color="#808080"),
             AlphaSettings(mode="Reconstruct", key_color="#ffffff"),
             AlphaSettings(mode="Reconstruct", opaque_threshold=120, transparent_threshold=120),
+            AlphaSettings(mode="Reconstruct", opaque_threshold=255),
+            AlphaSettings(mode="Reconstruct", opaque_threshold=254.5),
             AlphaSettings(mode="Invalid"),
         ):
             with self.subTest(settings=settings), self.assertRaises(ValueError):
                 settings.validate()
         AlphaSettings(mode="Native", key_color="#808080").validate()
+
+    def test_inactive_reconstruction_settings_do_not_block_generation(self):
+        for mode in ("Off", "Native"):
+            with self.subTest(mode=mode):
+                AlphaSettings(mode=mode, key_color="#808080", opaque_threshold=200, transparent_threshold=100).validate()
+
+    def test_result_more_saturated_than_key_calibrates_without_nan(self):
+        source, _ = scene()
+        source[:, :16] = (100, 100, 100, 255)
+        reference = Image.fromarray(source, "RGBA")
+        for color in ((0, 128, 0), (128, 0, 128)):
+            with self.subTest(key=color), warnings.catch_warnings(action="error"):
+                rendered = Image.new("RGB", reference.size, tuple(255 if channel else 0 for channel in color))
+                rendered.paste((100, 100, 100), (0, 0, 16, 16))
+                result, calibration = reconstruct(rendered, reference, color)
+                pixels = np.asarray(result)
+                self.assertTrue((pixels[:, :16] == (100, 100, 100, 255)).all())
+                self.assertTrue((pixels[:, 16:, 3] == 0).all())
+                self.assertTrue(np.isfinite((calibration.opaque_threshold, calibration.transparent_threshold, calibration.color_shift)).all())
+                self.assertLessEqual(calibration.transparent_threshold, 255)
+
+    def test_manual_opaque_limit_keeps_auto_transparent_in_slider_range(self):
+        source, rendered = scene()
+        rendered[:, 16:] = GREEN
+        result, calibration = run(source, rendered, opaque_threshold=254)
+        self.assertGreater(calibration.transparent_threshold, calibration.opaque_threshold)
+        self.assertLessEqual(calibration.transparent_threshold, 255)
+        self.assertTrue((result[:, 16:, 3] == 0).all())
+        with self.assertRaisesRegex(ValueError, "opaque threshold"):
+            run(source, rendered, opaque_threshold=255)
 
     def test_inpaint_mask_preserves_original_and_blends_alpha(self):
         original = Image.new("RGBA", (3, 1), (255, 0, 0, 128))

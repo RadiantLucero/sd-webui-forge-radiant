@@ -85,14 +85,14 @@ class ScriptImg2imgTransparency(scripts.Script):
 
                 sliders = {}
                 autos = {}
-                for name, minimum, value, label, info in (
-                    ("opaque", 0, 40, "Opaque up to key strength", "pixels at or below this value stay fully opaque and unchanged"),
-                    ("transparent", 1, 200, "Transparent from key strength", "pixels at or above this value become fully transparent"),
-                    ("shift", 0, 180, "Color shift", "key color removed from partially transparent pixels"),
+                for name, minimum, maximum, value, label, info in (
+                    ("opaque", 0, 254, 40, "Opaque up to key strength", "pixels at or below this value stay fully opaque and unchanged"),
+                    ("transparent", 1, 255, 200, "Transparent from key strength", "pixels at or above this value become fully transparent"),
+                    ("shift", 0, 255, 180, "Color shift", "key color removed from partially transparent pixels"),
                 ):
                     with gr.Row(equal_height=True):
                         autos[name] = gr.Checkbox(label="Auto", value=True, elem_id=self.elem_id(f"{name}_auto"), scale=0, min_width=80)
-                        sliders[name] = gr.Slider(label=label, minimum=minimum, maximum=255, step=1, value=value, elem_id=self.elem_id(name), info=info, scale=1)
+                        sliders[name] = gr.Slider(label=label, minimum=minimum, maximum=maximum, step=1, value=value, elem_id=self.elem_id(name), info=info, scale=1)
                     sliders[name].input(fn=lambda: False, outputs=[autos[name]], show_progress="hidden")
 
                 self.calculated_values = gr.Markdown(describe([]), elem_id=self.elem_id("calculated_values"))
@@ -108,7 +108,7 @@ class ScriptImg2imgTransparency(scripts.Script):
         def use_last_values(values):
             if not values:
                 return [gr.skip()] * (len(names) * 2)
-            return [gr.update(value=min(max(values[name], sliders[name].minimum), 255)) for name in names] + [False] * len(names)
+            return [gr.update(value=min(max(values[name], sliders[name].minimum), sliders[name].maximum)) for name in names] + [False] * len(names)
 
         use_values.click(fn=use_last_values, inputs=[self.last_values], outputs=self.slider_outputs + self.auto_inputs, show_progress="hidden")
 
@@ -117,7 +117,7 @@ class ScriptImg2imgTransparency(scripts.Script):
                 value = parse_threshold(params[key]) if key in params else None
                 if value is None:
                     return None
-                return value[1] if slider is None else min(max(value[0], slider.minimum), 255)
+                return value[1] if slider is None else min(max(value[0], slider.minimum), slider.maximum)
 
             return paste
 
@@ -146,7 +146,7 @@ class ScriptImg2imgTransparency(scripts.Script):
                 return [describe(results), None] + [gr.skip()] * len(THRESHOLD_KEYS)
 
             first = {name: value for name, (value, _) in results[0][0].items()}
-            sliders = [gr.update(value=min(max(first[name], slider.minimum), 255)) if auto else gr.skip() for (name, _, _), slider, auto in zip(THRESHOLD_KEYS, self.slider_outputs, automatic)]
+            sliders = [gr.update(value=min(max(first[name], slider.minimum), slider.maximum)) if auto else gr.skip() for (name, _, _), slider, auto in zip(THRESHOLD_KEYS, self.slider_outputs, automatic)]
             return [describe(results), first] + sliders
 
         generation_info.change(
