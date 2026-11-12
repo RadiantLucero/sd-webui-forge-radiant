@@ -1,5 +1,6 @@
 import json
 import re
+from types import SimpleNamespace
 
 import gradio as gr
 from PIL import Image
@@ -388,6 +389,13 @@ class ScriptImg2imgTransparency(scripts.Script):
         infotext = info["infotexts"][infotext_index]
         params = parse_generation_parameters(infotext)
         raw_info = replace_infotext_values(infotext, {"img2img alpha output": "raw before reconstruction"})
+        # Folder and filename patterns read generation values from p, like the gallery Save button.
+        p = SimpleNamespace(**info)
+        image_index = infotext_index - info.get("index_of_first_image", 0)
+        batch_size = info.get("batch_size") or 1
+        p.batch_index = image_index % batch_size
+        p.iteration = image_index // batch_size
+        p.n_iter = max(1, len(info.get("all_seeds") or ()) // batch_size)
         filename, _ = images.save_image(
             cached.image.copy(),
             path=shared.opts.outdir_samples or shared.opts.outdir_img2img_samples,
@@ -396,10 +404,8 @@ class ScriptImg2imgTransparency(scripts.Script):
             prompt=params.get("Prompt", ""),
             extension=shared.opts.samples_format,
             info=raw_info,
-            short_filename=True,
-            no_prompt=True,
+            p=p,
             suffix="-original",
-            save_to_dirs=False,
         )
         return gr.update(value=f"Saved raw generated image to {filename}", visible=True)
 

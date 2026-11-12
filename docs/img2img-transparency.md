@@ -113,7 +113,9 @@ infotext and console log.
 Select a generated image in the img2img output gallery, adjust the settings, and
 use **Reconstruct with current settings** to rebuild its alpha without another
 model generation. **Save raw image to output** saves the generated RGB image
-before reconstruction to the normal img2img output directory. Both buttons act
+before reconstruction to the normal img2img output directory, using the
+subdirectory and filename settings for generated images plus an `-original`
+suffix. Date-based names use the save date. Both buttons act
 on the selected generated image, not on a grid or mask. If no image is selected
 and there is exactly one generated result, both buttons use it automatically,
 even if the gallery also contains a grid or masks. With multiple generated

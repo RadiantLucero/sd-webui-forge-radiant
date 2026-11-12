@@ -1,12 +1,17 @@
 import ast
+import datetime
+import functools
 import json
 import math
+import os
 import re
 import shutil
+import string
 import subprocess
 import tempfile
 import unittest
 from abc import abstractmethod
+from collections import namedtuple
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,7 +19,7 @@ from unittest.mock import Mock, patch
 
 import gradio as gr
 import torch
-from PIL import Image
+from PIL import Image, PngImagePlugin
 
 from modules import img2img_alpha
 
@@ -197,7 +202,7 @@ class TransparencyCallbackTests(unittest.TestCase):
             return str(self.saved_path), None
 
         scope = {
-            "gr": gr, "Image": Image, "json": json, "re": re, "img2img_alpha": img2img_alpha,
+            "gr": gr, "Image": Image, "json": json, "re": re, "SimpleNamespace": SimpleNamespace, "img2img_alpha": img2img_alpha,
             "scripts": SimpleNamespace(Script=object),
             "images": SimpleNamespace(save_image=Mock(side_effect=save_image)),
             "shared": SimpleNamespace(opts=SimpleNamespace(outdir_samples="", outdir_img2img_samples=self.directory, samples_format="png")),
@@ -313,6 +318,34 @@ class TransparencyCallbackTests(unittest.TestCase):
         self.invoke(self.save, -1)
         with Image.open(self.saved_path) as saved:
             self.assertEqual(saved.tobytes(), self.raw[0].tobytes())
+
+    def test_save_follows_output_subdirectory_and_filename_settings(self):
+        opts = SimpleNamespace(
+            save_to_dirs=True, directories_filename_pattern="[date]", samples_filename_pattern="[seed]-[steps]-[batch_number]",
+            save_images_add_number=True, save_images_replace_action="Override", enable_pnginfo=True, jpeg_quality=80,
+            export_for_4chan=False, target_side_length=4000, save_txt=False,
+        )
+        image_scope = {
+            "Image": Image, "PngImagePlugin": PngImagePlugin, "datetime": datetime, "functools": functools, "namedtuple": namedtuple,
+            "os": os, "re": re, "string": string, "register_heif_opener": lambda: None, "opts": opts,
+            "shared": SimpleNamespace(opts=opts, cmd_opts=SimpleNamespace(unix_filenames_sanitization=False, filenames_max_length=128)),
+            "script_callbacks": SimpleNamespace(
+                ImageSaveParams=lambda image, p, filename, pnginfo: SimpleNamespace(image=image, p=p, filename=filename, pnginfo=pnginfo),
+                before_image_saved_callback=lambda params: None,
+                image_saved_callback=lambda params: None,
+            ),
+        }
+        load_logic("modules/images.py", image_scope)
+        self.scope["images"] = SimpleNamespace(save_image=image_scope["save_image"])
+        self.info.update(steps=7, batch_size=2, all_seeds=[1, 2])
+
+        message = self.invoke(self.save, 4)["value"]
+
+        expected = Path(self.directory, datetime.date.today().isoformat(), "00000-1-7-2-original.png")
+        self.assertEqual(message, f"Saved raw generated image to {expected}")
+        with Image.open(expected) as saved:
+            self.assertEqual(saved.tobytes(), self.raw[1].tobytes())
+            self.assertIn("img2img alpha output: raw before reconstruction", saved.info["parameters"])
 
     def test_grid_and_mask_are_not_treated_as_generated_images(self):
         for index in (-1, 0, 2):
