@@ -1,15 +1,55 @@
-"""Dynamic Prompts syntax in X/Y/Z plot Prompt S/R values.
+"""Dynamic Prompts support: wildcards in X/Y/Z plot Prompt S/R values, and a fix for immediate variables.
 
 The Dynamic Prompts extension resolves wildcards only while each grid cell is processed. A wildcard in a Prompt S/R
 value would therefore show as a placeholder label, and with combinatorial generation every cell would render all
 combinations while the grid keeps only its first image. Resolving the values before the grid is built avoids both.
 """
 
+import dataclasses
 import inspect
 import re
 
+from modules import patches
+
 # Combinatorial generation repeats unresolvable wildcards endlessly, so it always needs a limit.
 MAX_COMBINATIONS = 1000
+
+
+def patch_immediate_variables():
+    """Make combinatorial generation produce one prompt per value of an immediate variable such as ${animal=!{cat|dog}}.
+
+    dynamicprompts evaluates such a variable once and keeps only its first value there, although the Dynamic Prompts
+    syntax documentation promises one prompt per value. Returns False when dynamicprompts is not installed.
+    """
+    try:
+        from dynamicprompts.commands import LiteralCommand
+        from dynamicprompts.commands.variable_commands import VariableAssignmentCommand
+        from dynamicprompts.samplers.combinatorial import CombinatorialSampler
+    except ImportError:
+        return False
+    if patches.original(__name__, CombinatorialSampler, "_get_sequence") is not None:
+        return True
+    original = CombinatorialSampler._get_sequence
+
+    def get_sequence(self, command, context):
+        for index, token in enumerate(command.tokens):
+            # The same conditions under which dynamicprompts samples the value; random values like ~{a|b} stay one draw.
+            if (
+                isinstance(token, VariableAssignmentCommand)
+                and token.immediate
+                and not isinstance(token.value, LiteralCommand)
+                and (token.overwrite or token.name not in context.variables)
+                and not context.get_effective_sampling_method(token.value).is_nonfinite()
+            ):
+                for value in context.generator_from_command(token.value):
+                    fixed = dataclasses.replace(token, value=LiteralCommand(str(value)))
+                    tokens = [*command.tokens[:index], fixed, *command.tokens[index + 1 :]]
+                    yield from get_sequence(self, dataclasses.replace(command, tokens=tokens), context)
+                return
+        yield from original(self, command, context)
+
+    patches.patch(__name__, CombinatorialSampler, "_get_sequence", get_sequence)
+    return True
 
 
 class PromptValues(list):

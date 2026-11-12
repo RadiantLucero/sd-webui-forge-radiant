@@ -1,4 +1,10 @@
-# Wildcards in X/Y/Z Prompt S/R
+# Dynamic Prompts support
+
+Forge adds two things to the Dynamic Prompts extension: wildcards in X/Y/Z
+plot Prompt S/R values, and a fix for immediate variables in combinatorial
+generation.
+
+## Wildcards in X/Y/Z Prompt S/R
 
 When the Dynamic Prompts extension is installed and enabled, X/Y/Z plot
 **Prompt S/R** and **Prompt S/R (LoRA)** values may contain its wildcard
@@ -37,6 +43,27 @@ otherwise, it shows only the first. The plot's size check does not account for
 these cell grids. To get one image per cell and labeled values, put that
 wildcard on its own Prompt S/R axis as well.
 
-Unit tests for the resolution are in
+## Immediate variables in combinatorial generation
+
+An immediate variable such as `${animal=!{cat|dog}}` is evaluated once, and
+every `${animal}` in the prompt uses that value. The `dynamicprompts` library
+kept only the first value in combinatorial generation, although the Dynamic
+Prompts syntax documentation promises one prompt per value. Forge patches the
+library at startup, so the prompt
+
+```
+${animal=!{cat|dog}} a ${animal} and another ${animal}
+```
+
+produces "a cat and another cat" and "a dog and another dog". Several
+immediate variables produce every combination of their values. A value that
+is drawn randomly, such as `{~cat|dog}`, stays a single draw. Variables without
+`!` are unchanged: each use is evaluated separately.
+
+Random generation is not changed. There, the library draws an immediate
+variable once per generation request, so all images of a batch share its
+value.
+
+Unit tests for both features are in
 [`tests/test_prompt_wildcards.py`](../tests/test_prompt_wildcards.py); they
 require the `dynamicprompts` package and are skipped without it.
