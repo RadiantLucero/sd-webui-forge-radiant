@@ -31,8 +31,11 @@ and the wildcard folder. Values stay literal while **Dynamic Prompts enabled**
 is off or **Enable Jinja2 templates** is on.
 
 Wildcards in the main prompt are still resolved by Dynamic Prompts for every
-cell. In combinatorial mode, such a cell produces several images, but the grid
-shows only its first image.
+cell. In combinatorial mode, such a cell produces several images. With **Show
+Grids in gallery** enabled, the cell shows a small grid of all of them;
+otherwise, it shows only the first. The plot's size check does not account for
+these cell grids. To get one image per cell and labeled values, put that
+wildcard on its own Prompt S/R axis as well.
 
 Unit tests for the resolution are in
 [`tests/test_prompt_wildcards.py`](../tests/test_prompt_wildcards.py); they
