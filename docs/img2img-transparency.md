@@ -86,6 +86,24 @@ makes them slightly transparent, but a nearly black pixel cannot become
 strongly transparent. The infotext and console statistics report the number of
 island pixels.
 
+**Alpha from surrounding smoke** (on by default, used with the island check)
+assumes the usual case of an opaque subject surrounded by translucent smoke.
+Islands whose neighbors are mainly partially transparent (again at least
+**Island surrounded share**) take the average alpha of those neighbors instead
+of their own, so dark spots where the model dimmed the key behind the smoke
+become as transparent as the smoke around them. A pixel never becomes more
+transparent than its brightness allows, so sparks and highlights stay strong.
+Only the key share that the pixel still shows is removed from its color, so it
+stays neutral instead of turning magenta. Pixels leaning clearly away from the
+key, such as skin, red, or brown, are never taken from smoke, and islands on
+empty background keep the island rule above. Thin dark neutral details inside
+smoke, such as black hair, may become translucent. Only opaque pixels are
+taken; dark smoke that still shows some key keeps its own, possibly too high,
+alpha. Larger dark spots need a larger radius and a lower share, for example 8
+and 60%, which may also erode corners of dark neutral subjects by a pixel or
+two. The infotext and console statistics report how many island pixels were
+taken from smoke.
+
 Moving a slider switches its value to manual. After generation, the accordion
 lists the values used for every image, and Auto sliders show the values from
 the first image. **Use last calculated values** copies those values into the
@@ -106,7 +124,7 @@ The script is named `transparency`. Its `alwayson_scripts` arguments are:
 `enabled, mode, key_color, auto_key_color, opaque_auto, opaque,
 transparent_auto, transparent, color_shift_auto, color_shift`, optionally
 followed by `island_check, island_auto, island, island_radius,
-island_share_percent`.
+island_share_percent, island_smoke`.
 
 ## Limits
 

@@ -35,6 +35,24 @@ def run(source, rendered, **settings):
     return np.asarray(result).astype(int), calibration
 
 
+def shadow_scene():
+    """Subject on the left, a dark translucent shadow with opaque spots in the middle, and background on the right."""
+    source = np.zeros((24, 64, 4), np.uint8)
+    source[:, :16] = (*SUBJECT, 255)
+    source[:, 16:56] = (12, 12, 16, 199)
+    rendered = np.empty((24, 64, 3), np.uint8)
+    rendered[:] = KEY
+    rendered[:, :16] = SUBJECT
+    rendered[:, 16:56] = np.round(0.78 * np.array((12, 12, 16)) + 0.22 * np.array(KEY))
+    # A subject edge with slight key dominance borders the shadow on one side only.
+    rendered[:, 15] = (100, 112, 100)
+    spots = ((4, 24), (12, 36), (20, 46))
+    for spot in spots:
+        rendered[spot] = (10, 22, 10)
+    rendered[10:12, 28:30] = (20, 20, 20)
+    return source, rendered, spots
+
+
 class Img2ImgAlphaTests(unittest.TestCase):
     def test_native_vae_error_reports_detected_channels_and_model(self):
         encoder = SimpleNamespace(conv1=SimpleNamespace(in_channels=3))
@@ -120,33 +138,45 @@ class Img2ImgAlphaTests(unittest.TestCase):
                 self.assertTrue((np.abs(over_white - (alpha * np.array(color) + (1 - alpha) * 255)) <= 8).all())
 
     def test_island_check_unmixes_opaque_spots_inside_translucent_areas(self):
-        source = np.zeros((24, 64, 4), np.uint8)
-        source[:, :16] = (*SUBJECT, 255)
-        source[:, 16:56] = (12, 12, 16, 199)
-        rendered = np.empty((24, 64, 3), np.uint8)
-        rendered[:] = KEY
-        rendered[:, :16] = SUBJECT
-        rendered[:, 16:56] = np.round(0.78 * np.array((12, 12, 16)) + 0.22 * np.array(KEY))
-        # A subject edge with slight key dominance borders the shadow on one side only.
-        rendered[:, 15] = (100, 112, 100)
-        spots = ((4, 24), (12, 36), (20, 46))
-        for spot in spots:
-            rendered[spot] = (10, 22, 10)
-        rendered[10:12, 28:30] = (20, 20, 20)
-
+        source, rendered, spots = shadow_scene()
         plain, calibration = run(source, rendered)
         self.assertGreater(calibration.opaque_threshold, 12)
         self.assertTrue(all((plain[spot] == (10, 22, 10, 255)).all() for spot in spots))
 
-        result, calibration = run(source, rendered, island_check=True)
+        result, calibration = run(source, rendered, island_check=True, island_smoke=False)
         self.assertEqual(calibration.island_pixels, len(spots))
         self.assertEqual(calibration.infotext()["img2img alpha island"], "0 auto")
+        self.assertEqual(calibration.infotext()["img2img alpha island smoke"], "off")
         for spot in spots:
             with self.subTest(spot=spot):
                 self.assertTrue(200 < result[spot][3] < 255)
                 self.assertLessEqual(ChromaKey(GREEN).strength(result[spot][:3]), 1)
         self.assertTrue((result[10:12, 28:30] == (20, 20, 20, 255)).all())
         self.assertTrue((result[:, :16] == plain[:, :16]).all())
+
+    def test_island_smoke_takes_alpha_from_surrounding_smoke(self):
+        source, rendered, spots = shadow_scene()
+        rendered[20, 30] = (250, 250, 250)
+        rendered[16, 40] = SUBJECT
+        rendered[:, 60] = (30, 30, 30)
+        plain, _ = run(source, rendered, island_check=True, island_smoke=False)
+        result, calibration = run(source, rendered, island_check=True)
+
+        # Spots and the neutral dark patch take the shadow's alpha and lose the dimmed key without turning magenta.
+        smoke_alpha = plain[6, 32, 3]
+        taken = [*spots, (10, 28), (10, 29), (11, 28), (11, 29)]
+        for pixel in taken:
+            with self.subTest(pixel=pixel):
+                self.assertLessEqual(abs(result[pixel][3] - smoke_alpha), 2)
+                self.assertLessEqual(np.ptp(result[pixel][:3]), 1)
+        self.assertEqual((calibration.island_pixels, calibration.island_smoke_pixels), (0, len(taken) + 1))
+        self.assertEqual(calibration.infotext()["img2img alpha island smoke"], "on")
+        self.assertIn("8 from smoke", calibration.statistics())
+        # Brightness limits transparency; colors leaning away from the key, the subject edge, and strands on empty background stay opaque.
+        self.assertGreaterEqual(result[20, 30, 3], 245)
+        self.assertTrue((result[16, 40] == (*SUBJECT, 255)).all())
+        self.assertTrue((result[:, :16] == plain[:, :16]).all())
+        self.assertTrue((result[:, 60] == (30, 30, 30, 255)).all())
 
     def test_original_alpha_contributes_only_statistics(self):
         source, rendered = scene()
