@@ -16,6 +16,7 @@ THRESHOLD_KEYS = (
 OPTIONAL_KEYS = {"island"}
 ISLAND_RADIUS_KEY = "img2img alpha island radius"
 ISLAND_SHARE_KEY = "img2img alpha island share"
+ISLAND_SMOKE_KEY = "img2img alpha island smoke"
 
 
 def parse_threshold(text):
@@ -108,10 +109,11 @@ class ScriptImg2imgTransparency(scripts.Script):
 
                 island_check = gr.Checkbox(label="Island check", value=False, elem_id=self.elem_id("island_check"), info="second pass for opaque pixels that are mostly surrounded by partially or fully transparent pixels")
                 with gr.Column(visible=False) as island_controls:
-                    threshold_row("island", 0, 254, 0, "Island: partial transparency above key dominance", "lower partial threshold for these pixels; auto uses the subject's own key dominance without the noise margin")
+                    threshold_row("island", 0, 254, 0, "Island: partial transparency above key dominance", "lower partial threshold for islands not taken from smoke; auto uses the subject's own key dominance without the noise margin")
                     with gr.Row():
                         island_radius = gr.Slider(label="Island radius", minimum=1, maximum=img2img_alpha.MAX_ISLAND_RADIUS, step=1, value=4, elem_id=self.elem_id("island_radius"), info="pixels checked in every direction around an opaque pixel")
                         island_share = gr.Slider(label="Island surrounded share (%)", minimum=1, maximum=100, step=1, value=70, elem_id=self.elem_id("island_share"), info="minimum share of partially or fully transparent pixels around it")
+                    island_smoke = gr.Checkbox(label="Alpha from surrounding smoke", value=True, elem_id=self.elem_id("island_smoke"), info="assumes an opaque subject surrounded by translucent smoke: islands mostly surrounded by partial transparency take its average alpha; brightness limits transparency, colors leaning away from the key stay opaque, but thin dark neutral details inside smoke may turn translucent")
 
                 self.calculated_values = gr.Markdown(describe([]), elem_id=self.elem_id("calculated_values"))
                 self.last_values = gr.State(None)
@@ -162,6 +164,7 @@ class ScriptImg2imgTransparency(scripts.Script):
             PasteField(island_check, lambda params: "img2img alpha island" in params if "img2img alpha" in params else None),
             PasteField(island_radius, paste_number(ISLAND_RADIUS_KEY, island_radius)),
             PasteField(island_share, paste_number(ISLAND_SHARE_KEY, island_share, "%")),
+            PasteField(island_smoke, lambda params: params.get(ISLAND_SMOKE_KEY) == "on" if "img2img alpha island" in params else None),
         ]
         for name, key, _ in THRESHOLD_KEYS:
             self.infotext_fields.append(PasteField(sliders[name], paste_threshold(key, sliders[name])))
@@ -170,7 +173,7 @@ class ScriptImg2imgTransparency(scripts.Script):
         return [
             enable, mode, key_color, auto_key,
             autos["opaque"], sliders["opaque"], autos["transparent"], sliders["transparent"], autos["shift"], sliders["shift"],
-            island_check, autos["island"], sliders["island"], island_radius, island_share,
+            island_check, autos["island"], sliders["island"], island_radius, island_share, island_smoke,
         ]
 
     def connect_generation_info(self, component):
@@ -192,7 +195,7 @@ class ScriptImg2imgTransparency(scripts.Script):
             show_progress="hidden",
         )
 
-    def setup(self, p, enable, mode, key_color, auto_key, opaque_auto, opaque, transparent_auto, transparent, shift_auto, shift, island_check=False, island_auto=True, island=0, island_radius=4, island_share=70):
+    def setup(self, p, enable, mode, key_color, auto_key, opaque_auto, opaque, transparent_auto, transparent, shift_auto, shift, island_check=False, island_auto=True, island=0, island_radius=4, island_share=70, island_smoke=True):
         p.img2img_alpha_settings = img2img_alpha.AlphaSettings(
             mode=mode if enable else "Off",
             key_color=key_color or img2img_alpha.DEFAULT_KEY_COLOR,
@@ -204,4 +207,5 @@ class ScriptImg2imgTransparency(scripts.Script):
             island_threshold=None if island_auto else float(island),
             island_radius=int(island_radius),
             island_share=float(island_share) / 100,
+            island_smoke=bool(island_smoke),
         )

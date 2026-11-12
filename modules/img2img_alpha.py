@@ -36,6 +36,8 @@ VISIBLE_ALPHA = 242
 TRANSPARENT_ALPHA = 12
 FOREGROUND_SAMPLE = 0.9
 MAX_ISLAND_RADIUS = 64
+# Smoke over the key leans toward it; pixels leaning further away, such as skin, red, or brown, are never taken as smoke.
+SMOKE_LEAN_MARGIN = 12
 _SMOOTHING = np.exp(-0.5 * (np.arange(-9, 10) / 3.0) ** 2)
 _SMOOTHING /= _SMOOTHING.sum()
 
@@ -54,6 +56,7 @@ class AlphaSettings:
     island_threshold: float | None = None
     island_radius: int = 4
     island_share: float = 0.7
+    island_smoke: bool = True
 
     def validate(self):
         if self.mode not in MODES:
@@ -101,7 +104,9 @@ class Calibration:
     auto_island: bool = False
     island_radius: int = 0
     island_share: float = 0.0
+    island_smoke: bool = False
     island_pixels: int = 0
+    island_smoke_pixels: int = 0
 
     def infotext(self):
         def value(number, automatic):
@@ -116,6 +121,7 @@ class Calibration:
             info["img2img alpha island"] = value(self.island_threshold, self.auto_island)
             info["img2img alpha island radius"] = str(self.island_radius)
             info["img2img alpha island share"] = f"{self.island_share:.0%}"
+            info["img2img alpha island smoke"] = "on" if self.island_smoke else "off"
         info["img2img alpha statistics"] = self.statistics()
         return info
 
@@ -123,6 +129,8 @@ class Calibration:
         background = "none" if self.background_level is None else f"{format_color(np.round(self.background_color).astype(int))} {self.background_level:.0f} +/- {self.background_spread:.0f}"
         original = "none" if self.original_level is None else f"{self.original_level:.0f}"
         islands = "" if self.island_threshold is None else f"; island pixels {self.island_pixels} above {self.island_threshold:.0f}"
+        if self.island_threshold is not None and self.island_smoke:
+            islands += f", {self.island_smoke_pixels} from smoke"
         return (
             f"background {background}; foreground {self.foreground_level:.0f}; original {original}; tint {self.tint:.0f}; "
             f"transparent area {self.original_transparent_fraction:.0%} -> {self.background_fraction:.0%}{islands}"
@@ -171,19 +179,12 @@ def _spread(values, center):
     return 1.4826 * float(np.median(np.abs(values - center))) if values.size else 0.0
 
 
-def _surrounded(mask, radius, share):
-    """Whether at least ``share`` of the other pixels within ``radius`` (a square, clipped at the border) are set in ``mask``."""
-
-    def window_sum(values):
-        padded = np.pad(values.astype(np.int64), ((radius + 1, radius), (radius + 1, radius)))
-        integral = padded.cumsum(axis=0).cumsum(axis=1)
-        size = 2 * radius + 1
-        return integral[size:, size:] - integral[:-size, size:] - integral[size:, :-size] + integral[:-size, :-size]
-
-    mask = np.asarray(mask, dtype=bool)
-    neighbors = window_sum(np.ones(mask.shape, dtype=bool)) - 1
-    hits = window_sum(mask) - mask
-    return (neighbors > 0) & (hits >= share * neighbors)
+def _window_sum(values, radius):
+    """Sum of ``values`` over the square within ``radius`` around every pixel, clipped at the image border."""
+    padded = np.pad(np.asarray(values, dtype=np.float64), ((radius + 1, radius), (radius + 1, radius)))
+    integral = padded.cumsum(axis=0).cumsum(axis=1)
+    size = 2 * radius + 1
+    return integral[size:, size:] - integral[:-size, size:] - integral[size:, :-size] + integral[:-size, :-size]
 
 
 def calibrate(key, rgb, strength, original, settings):
@@ -276,6 +277,7 @@ def calibrate(key, rgb, strength, original, settings):
         auto_island=settings.island_threshold is None,
         island_radius=int(settings.island_radius),
         island_share=float(settings.island_share),
+        island_smoke=island is not None and bool(settings.island_smoke),
     )
 
 
@@ -294,18 +296,45 @@ def reconstruct(image, reference, background, settings=None):
     calibration = calibrate(key, rgb, strength, np.asarray(reference.convert("RGBA"), dtype=np.float32), settings)
 
     opaque = strength <= calibration.opaque_threshold
-    if calibration.island_threshold is not None:
-        islands = opaque & (strength > calibration.island_threshold) & _surrounded(~opaque, calibration.island_radius, calibration.island_share)
-        opaque &= ~islands
-        calibration = replace(calibration, island_pixels=int(np.count_nonzero(islands)))
+    transparent = strength >= calibration.transparent_threshold
     # Like a green-screen key, alpha falls with key dominance and reaches zero at the color shift (the measured background by default).
-    alpha = np.clip(1.0 - strength / max(calibration.color_shift, 1.0), 0.0, 1.0)
-    alpha = np.where(opaque, 1.0, np.where(strength >= calibration.transparent_threshold, 0.0, alpha))
+    keyed = np.clip(1.0 - strength / max(calibration.color_shift, 1.0), 0.0, 1.0)
+    alpha = np.where(opaque, 1.0, np.where(transparent, 0.0, keyed))
+
+    smoke = np.zeros_like(opaque)
+    if calibration.island_threshold is not None:
+        radius, share = calibration.island_radius, calibration.island_share
+        neighbors = _window_sum(np.ones(opaque.shape), radius) - 1
+
+        def mostly(count):
+            return (neighbors > 0) & (count >= share * neighbors)
+
+        surrounded = opaque & mostly(_window_sum(~opaque, radius))
+        if calibration.island_smoke:
+            partial = ~opaque & ~transparent
+            partial_count = _window_sum(partial, radius)
+            smoke = surrounded & mostly(partial_count) & (strength >= -SMOKE_LEAN_MARGIN)
+            # Assuming an opaque subject surrounded by translucent smoke, these pixels belong to the smoke even without key tint.
+            # They take its average alpha, but never become more transparent than their brightness allows.
+            surrounding = (_window_sum(np.where(partial, alpha, 0.0), radius) / np.maximum(partial_count, 1.0)).astype(alpha.dtype)
+            alpha = np.where(smoke, np.maximum(surrounding, rgb.max(axis=2) / 255.0), alpha)
+        islands = surrounded & ~smoke & (strength > calibration.island_threshold)
+        alpha = np.where(islands, keyed, alpha)
+        opaque &= ~(islands | smoke)
+        calibration = replace(calibration, island_pixels=int(np.count_nonzero(islands)), island_smoke_pixels=int(np.count_nonzero(smoke)))
     alpha = np.round(alpha * 255.0) / 255.0
 
     # Partially transparent pixels are alpha * color + (1 - alpha) * rendered background; remove the background share.
     background_rgb = np.asarray(calibration.background_color, dtype=np.float32)
-    unmixed = background_rgb + (rgb - background_rgb) / np.maximum(alpha, 1.0 / 255.0)[:, :, None]
+    coverage = np.maximum(alpha, 1.0 / 255.0)[:, :, None]
+    unmixed = background_rgb + (rgb - background_rgb) / coverage
+    if smoke.any():
+        # Dark smoke often dims the rendered key behind it; remove only the key share the pixel shows, so it does not turn away from the key.
+        background_share = 1.0 - alpha
+        dimming = np.clip(np.maximum(strength, 0.0) / np.maximum(background_share * max(float(key.strength(background_rgb)), 1.0), 1e-6), 0.0, 1.0)
+        smoke_color = (rgb - (background_share * dimming)[:, :, None] * background_rgb) / coverage
+        smoke_color[:, :, key.high] -= (np.maximum(key.strength(smoke_color), 0.0) * (key.contrast / 255.0))[:, :, None]
+        unmixed = np.where(smoke[:, :, None], smoke_color, unmixed)
     # Fully transparent pixels keep a neutral color so that straight-alpha resampling shows no key fringe.
     despilled = rgb.copy()
     despilled[:, :, key.high] -= (np.maximum(strength, 0.0) * (key.contrast / 255.0))[:, :, None]
