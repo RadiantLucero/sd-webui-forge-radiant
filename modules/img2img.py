@@ -206,8 +206,6 @@ def img2img_function(id_task: str, request: gr.Request, mode: int, prompt: str, 
         mask = Image.merge("RGBA", (mask, mask, mask, Image.new("L", mask.size, 255)))
     elif mode == 4:  # inpaint upload mask
         image = init_img_inpaint
-        if image is not None and opts.img2img_alpha_mode == "Off":
-            image = image.convert("RGB")
         mask = init_mask_inpaint
 
     if mask and isinstance(mask, Image.Image):
@@ -257,6 +255,11 @@ def img2img_function(id_task: str, request: gr.Request, mode: int, prompt: str, 
 
     p.scripts = modules.scripts.scripts_img2img
     p.script_args = args
+
+    alpha_settings = p.img2img_alpha_settings
+    if mode == 4 and image is not None and (alpha_settings is None or alpha_settings.mode == "Off"):
+        # The upload component keeps alpha for the transparency script; Off keeps the previous RGB behavior.
+        p.init_images = [image.convert("RGB")]
 
     p.user = request.username
 
