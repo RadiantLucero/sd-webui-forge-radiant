@@ -1163,8 +1163,9 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
                 if alpha_mode != "Off" and image.mode != "RGBA":
                     raise RuntimeError("An img2img postprocessing extension removed the alpha channel.")
 
+                saved_path = None
                 if save_samples:
-                    images.save_image(image, p.outpath_samples, "", p.seeds[i], p.prompts[i], opts.samples_format, info=infotext(i), p=p)
+                    saved_path, _ = images.save_image(image, p.outpath_samples, "", p.seeds[i], p.prompts[i], opts.samples_format, info=infotext(i), p=p)
 
                 text = infotext(i)
                 infotexts.append(text)
@@ -1172,6 +1173,7 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
                     image.info["parameters"] = text
                 if alpha_mode == "Reconstruct":
                     p.alpha_gallery_indices.append(len(output_images))
+                    p.alpha_saved_paths.append(saved_path)
                 output_images.append(image)
 
                 if mask_for_overlay is not None:
@@ -1774,6 +1776,7 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
         self.alpha_raw_images = []
         self.alpha_reconstruction_contexts = []
         self.alpha_gallery_indices = []
+        self.alpha_saved_paths = []
         if self.img2img_alpha_mode != "Off":
             if self.resize_mode == 3:
                 raise RuntimeError("img2img transparency does not support latent upscale.")

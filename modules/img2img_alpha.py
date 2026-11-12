@@ -18,6 +18,8 @@ class ReconstructionCacheItem:
     original: Image.Image | None = None
     mask: Image.Image | None = None
     paste_to: tuple[int, int, int, int] | None = None
+    # The file that automatic saving wrote for this image; None when samples were not saved.
+    saved_path: str | None = None
 
 
 class ReconstructionCache:

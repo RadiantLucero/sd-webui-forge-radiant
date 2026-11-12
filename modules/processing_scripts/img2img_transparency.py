@@ -1,4 +1,6 @@
+import contextlib
 import json
+import os
 import re
 from types import SimpleNamespace
 
@@ -68,6 +70,37 @@ def replace_infotext_values(infotext, values):
             parameters += f", {key}: {quote(str(value))}"
 
     return "\n".join([*lines, parameters])
+
+
+def overwrite_saved_image(image, path, infotext):
+    """Replace the file that automatic saving wrote for this image, and its infotext file if present.
+
+    Returns whether everything was updated, and a status message.
+    """
+    if path is None:
+        return False, "Reconstruction not saved: automatic saving of generated images was off for this generation."
+    if not os.path.isfile(path):
+        return False, f"Reconstruction not saved: {path} no longer exists."
+
+    stem, extension = os.path.splitext(path)
+    temporary = f"{stem}.tmp"
+    try:
+        # Write beside the file first, so that it is replaced in one step and never left half-written.
+        images.save_image_with_geninfo(image, infotext, temporary, extension, preserve_alpha=True)
+        os.replace(temporary, path)
+    except OSError as error:
+        with contextlib.suppress(OSError):
+            os.remove(temporary)
+        return False, f"Reconstruction not saved: could not overwrite {path}: {error}"
+
+    text_path = f"{stem}.txt"
+    if os.path.isfile(text_path):
+        try:
+            with open(text_path, "w", encoding="utf8") as file:
+                file.write(f"{infotext}\n")
+        except OSError as error:
+            return False, f"Updated {path}, but not {text_path}: {error}"
+    return True, f"Updated {path}"
 
 
 def parse_threshold(text):
@@ -390,6 +423,9 @@ class ScriptImg2imgTransparency(scripts.Script):
         infotext = replace_infotext_values(infotext, values)
         info["infotexts"][infotext_index] = infotext
         info["extra_generation_params"].update(values)
+        # A toast, because the returned generation info triggers its change handler, which hides the cache status box.
+        updated, status = overwrite_saved_image(image, cached.saved_path, infotext)
+        (gr.Info if updated else gr.Warning)(status)
         return (
             gr.update(value=updated_gallery, selected_index=gallery_index),
             json.dumps(info),
@@ -445,6 +481,7 @@ class ScriptImg2imgTransparency(scripts.Script):
             len(p.alpha_raw_images)
             == len(p.alpha_reconstruction_contexts)
             == len(p.alpha_gallery_indices)
+            == len(p.alpha_saved_paths)
         ):
             raise RuntimeError("The cached img2img alpha outputs and gallery indices do not match.")
 
@@ -452,8 +489,8 @@ class ScriptImg2imgTransparency(scripts.Script):
         reference_count = len(p.alpha_references)
         if not reference_count or len(p.alpha_backgrounds) != reference_count:
             raise RuntimeError("The img2img alpha reconstruction references are incomplete.")
-        for raw_index, (image, context, gallery_index) in enumerate(
-            zip(p.alpha_raw_images, p.alpha_reconstruction_contexts, p.alpha_gallery_indices, strict=True)
+        for raw_index, (image, context, gallery_index, saved_path) in enumerate(
+            zip(p.alpha_raw_images, p.alpha_reconstruction_contexts, p.alpha_gallery_indices, p.alpha_saved_paths, strict=True)
         ):
             reference_index = raw_index % reference_count
             original, mask, paste_to = context if context is not None else (None, None, None)
@@ -464,6 +501,7 @@ class ScriptImg2imgTransparency(scripts.Script):
                 original=original,
                 mask=mask,
                 paste_to=paste_to,
+                saved_path=saved_path,
             )
 
         token = RECONSTRUCTION_CACHE.store(items)
