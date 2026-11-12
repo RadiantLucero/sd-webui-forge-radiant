@@ -24,37 +24,50 @@ Gray, white, and black cannot be separated from neutral content. **Auto key
 color** chooses the green, magenta, blue, red, cyan, or yellow key that the
 visible input leans toward least.
 
-Thresholds use **key strength**: the lowest key channel minus the highest
+Thresholds use **key dominance**: the lowest key channel minus the highest
 non-key channel, scaled so that the pure key color is 255. For green this is
 `G - max(R, B)`. Neutral colors are 0 and colors leaning away from the key are
-negative.
+negative. Content should not be strongly dominated by the key color, so
+dominance separates the subject from the background.
 
-- **Opaque up to**: pixels at or below this strength stay fully opaque and
-  unchanged.
-- **Transparent from**: pixels at or above this strength become fully
-  transparent.
-- Pixels between both thresholds receive linear partial alpha.
-- **Color shift**: key strength removed from partially transparent pixels in
-  proportion to their transparency. Despill never pushes a color past neutral,
-  so it cannot create the complementary tint, such as magenta for green.
+- **Partial transparency above key dominance**: pixels at or below this value
+  stay fully opaque and unchanged. A mix such as half red and half green is not
+  dominant enough and stays opaque.
+- **Transparent from key dominance**: pixels at or above this value become fully
+  transparent and lose their key tint.
+- Pixels between both thresholds are unmixed. The model renders a translucent
+  pixel as a mix of its color and the background, so alpha falls linearly with
+  dominance and reaches zero at the **Color shift** value. The background color
+  measured in the result is then removed from the pixel in proportion to its
+  transparency, which restores the brightness of the remaining color.
+- **Color shift**: the key dominance of a fully transparent pixel. At the
+  measured background dominance, unmixed colors are neutral with respect to the
+  key. Lower values make edges more transparent and tint them away from the key,
+  such as magenta for green. Higher values make edges more opaque and keep some
+  key tint.
 
-*Opaque up to* ranges from 0 to 254 and must stay below *Transparent from*
-(1 to 255). Invalid manual pairs produce an explicit error. Reconstruction
-settings are ignored when transparency is disabled or **Native** is selected.
-Results more saturated than the configured key use the top histogram bin for
-calibration, keeping Auto values within the slider range.
+*Partial transparency above* ranges from 0 to 254 and must stay below
+*Transparent from* (1 to 255). Invalid manual pairs produce an explicit error.
+Reconstruction settings are ignored when transparency is disabled or **Native**
+is selected. Results more saturated than the configured key use the top
+histogram bin for the thresholds, keeping them within the slider range.
 
 Each value has an **Auto** checkbox. Auto values are calculated per image:
 
-- The generated image's key-strength histogram locates the background peak.
+- The generated image's key-dominance histogram locates the background peak.
+  The search starts in the most key-like share of pixels that the original's
+  transparent area accounts for, so a large uniform translucent area is not
+  mistaken for the background. The background cluster's median color is the
+  measured background, for example a darker green than the configured key.
   *Transparent from* is the peak minus three robust standard deviations.
-- The visible original pixels give the expected subject strength. The shift of
-  the generated subject relative to the original is reported as `tint`.
-  *Opaque up to* is the original's 99th percentile plus the tint and a noise
-  margin, and normally stays at least 32 below *Transparent from* (a manually
-  selected transparent threshold below 32 leaves a narrower band).
-- *Color shift* is the distance between the background peak and the
-  generated subject.
+- The original's opaque area determines how many of the least key-like
+  generated pixels are compared with it. Translucent pixels are left out, so
+  they cannot raise the threshold. The shift of the generated subject relative
+  to the original is reported as `tint`. *Partial transparency above* is the
+  original's 99th percentile plus the tint and a noise margin, and normally
+  stays at least 32 below *Transparent from* (a manually selected transparent
+  threshold below 32 leaves a narrower band).
+- *Color shift* is the dominance of the measured background.
 
 Moving a slider switches its value to manual. After generation, the accordion
 lists the values used for every image, and Auto sliders show the values from
@@ -63,8 +76,12 @@ sliders as manual values. The values and statistics are also written to the
 infotext and console log.
 
 Reconstruction remains approximate: one RGB image does not uniquely determine
-alpha. New content close to the key color can become partially transparent, and
-there is no neighborhood analysis.
+alpha. Unmixing assumes that translucent content is not tinted toward the key,
+which is exact for white, gray, black, smoke, glass, and veils. Strongly colored
+soft edges, such as red or skin, become slightly too opaque and less saturated,
+and edges whose dominance stays below the partial threshold remain opaque. New
+content close to the key color can become partially transparent, and there is
+no neighborhood analysis.
 
 ## API
 

@@ -1,5 +1,6 @@
 """Alpha handling for img2img inputs and outputs."""
 
+import math
 from dataclasses import dataclass
 
 import numpy as np
@@ -33,6 +34,7 @@ MIN_BACKGROUND_FRACTION = 0.001
 MIN_PARTIAL_BAND = 32
 VISIBLE_ALPHA = 242
 TRANSPARENT_ALPHA = 12
+FOREGROUND_SAMPLE = 0.9
 _SMOOTHING = np.exp(-0.5 * (np.arange(-9, 10) / 3.0) ** 2)
 _SMOOTHING /= _SMOOTHING.sum()
 
@@ -66,7 +68,7 @@ class AlphaSettings:
 
 @dataclass(frozen=True)
 class Calibration:
-    """Thresholds in key-strength units: 0 is neutral and 255 is the pure key color."""
+    """Thresholds in key-dominance units: 0 is neutral and 255 is the pure key color."""
 
     opaque_threshold: float
     transparent_threshold: float
@@ -74,6 +76,7 @@ class Calibration:
     auto_opaque: bool
     auto_transparent: bool
     auto_color_shift: bool
+    background_color: tuple[float, float, float]
     background_level: float | None
     background_spread: float | None
     foreground_level: float
@@ -94,7 +97,7 @@ class Calibration:
         }
 
     def statistics(self):
-        background = "none" if self.background_level is None else f"{self.background_level:.0f} +/- {self.background_spread:.0f}"
+        background = "none" if self.background_level is None else f"{format_color(np.round(self.background_color).astype(int))} {self.background_level:.0f} +/- {self.background_spread:.0f}"
         original = "none" if self.original_level is None else f"{self.original_level:.0f}"
         return (
             f"background {background}; foreground {self.foreground_level:.0f}; original {original}; tint {self.tint:.0f}; "
@@ -144,25 +147,43 @@ def _spread(values, center):
     return 1.4826 * float(np.median(np.abs(values - center))) if values.size else 0.0
 
 
-def calibrate(strength, original_strength, original_transparent_fraction, settings):
-    """Derive thresholds from the generated key-strength histogram and global original statistics."""
+def calibrate(key, rgb, strength, original, settings):
+    """Derive thresholds from the generated key-dominance histogram and global original statistics."""
     settings.validate()
     # Use the same upper bound for the histogram and its samples when the result exceeds the key's saturation.
     values = np.minimum(np.asarray(strength, dtype=np.float32).ravel(), 255.0)
-    original_strength = np.asarray(original_strength, dtype=np.float32).ravel()
+    colors = np.asarray(rgb, dtype=np.float32).reshape(-1, 3)
+    original = np.asarray(original, dtype=np.float32).reshape(-1, 4)
+    visible = original[:, 3] >= VISIBLE_ALPHA
+    original_strength = np.sort(key.strength(original[visible, :3]))
+    # Compare only the least key-like pixels that the original's opaque area accounts for in both images,
+    # so partially transparent pixels cannot pass for a key-tinted subject.
+    original_opaque = original_strength[: math.ceil(original_strength.size * FOREGROUND_SAMPLE)]
+    transparent_fraction = float(np.mean(original[:, 3] <= TRANSPARENT_ALPHA)) if original.size else 0.0
 
     background_level = background_spread = None
-    foreground = values
+    background_rgb = np.asarray(key.color, dtype=np.float32)
+    candidates = values
     if np.mean(values >= BACKGROUND_SEARCH_START) >= MIN_BACKGROUND_FRACTION:
         histogram, _ = np.histogram(np.clip(values, 0, 255), bins=256, range=(0, 256))
         smoothed = np.convolve(histogram, _SMOOTHING, mode="same")
-        peak = BACKGROUND_SEARCH_START + int(np.argmax(smoothed[BACKGROUND_SEARCH_START:]))
-        cluster = values[np.abs(values - peak) <= BACKGROUND_WINDOW]
+        search_start = BACKGROUND_SEARCH_START
+        if transparent_fraction:
+            # The background is the most key-like part of the result, so a larger uniform translucent area cannot pass for it.
+            top = float(np.quantile(values, 1.0 - transparent_fraction * FOREGROUND_SAMPLE / 2))
+            search_start = min(max(search_start, int(top) - BACKGROUND_WINDOW), 255)
+        peak = search_start + int(np.argmax(smoothed[search_start:]))
+        in_cluster = np.abs(values - peak) <= BACKGROUND_WINDOW
+        cluster = values[in_cluster]
         background_level = float(np.median(cluster))
         background_spread = max(2.0, _spread(cluster, background_level))
-        foreground = values[values < background_level / 2]
+        background_rgb = np.median(colors[in_cluster], axis=0)
+        candidates = values[values < background_level / 2]
 
-    original_level = float(np.median(original_strength)) if original_strength.size else None
+    count = min(math.ceil(np.count_nonzero(visible) * FOREGROUND_SAMPLE), candidates.size)
+    foreground = np.partition(candidates, count - 1)[:count] if count else candidates[:0]
+
+    original_level = float(np.median(original_opaque)) if original_opaque.size else None
     if foreground.size:
         foreground_level = float(np.median(foreground))
         foreground_spread = _spread(foreground, foreground_level)
@@ -177,7 +198,7 @@ def calibrate(strength, original_strength, original_transparent_fraction, settin
     else:
         tint = max(0.0, foreground_level - original_level)
         upper = float(np.percentile(original_strength, 99)) + tint
-        noise = float(np.sqrt(max(foreground_spread**2 - _spread(original_strength, original_level) ** 2, 0.0)))
+        noise = float(np.sqrt(max(foreground_spread**2 - _spread(original_opaque, original_level) ** 2, 0.0)))
 
     auto_transparent = 255.0 if background_level is None else float(np.clip(round(background_level - 3 * background_spread), 64, 255))
     transparent = auto_transparent if settings.transparent_threshold is None else float(settings.transparent_threshold)
@@ -189,8 +210,7 @@ def calibrate(strength, original_strength, original_transparent_fraction, settin
     if opaque >= transparent:
         raise ValueError(f"The img2img transparency opaque threshold ({opaque:.0f}) must be lower than the transparent threshold ({transparent:.0f}).")
 
-    reference_level = background_level if background_level is not None else transparent
-    auto_shift = float(np.clip(round(reference_level - max(foreground_level, 0.0)), 0, 255))
+    auto_shift = float(max(round(float(key.strength(background_rgb))), 1))
     shift = auto_shift if settings.color_shift is None else float(settings.color_shift)
 
     return Calibration(
@@ -200,12 +220,13 @@ def calibrate(strength, original_strength, original_transparent_fraction, settin
         auto_opaque=settings.opaque_threshold is None,
         auto_transparent=settings.transparent_threshold is None,
         auto_color_shift=settings.color_shift is None,
+        background_color=tuple(float(channel) for channel in background_rgb),
         background_level=background_level,
         background_spread=background_spread,
         foreground_level=foreground_level,
         original_level=original_level,
         tint=tint,
-        original_transparent_fraction=float(original_transparent_fraction),
+        original_transparent_fraction=transparent_fraction,
         background_fraction=float(np.mean(values >= transparent)) if values.size else 0.0,
     )
 
@@ -220,23 +241,25 @@ def reconstruct(image, reference, background, settings=None):
 
     settings = settings or AlphaSettings(mode="Reconstruct")
     key = ChromaKey(background)
-    rgb = np.asarray(image.convert("RGB"), dtype=np.float32).copy()
-    original = np.asarray(reference.convert("RGBA"), dtype=np.float32)
+    rgb = np.asarray(image.convert("RGB"), dtype=np.float32)
     strength = key.strength(rgb)
-    calibration = calibrate(
-        strength,
-        key.strength(original[:, :, :3][original[:, :, 3] >= VISIBLE_ALPHA]),
-        np.mean(original[:, :, 3] <= TRANSPARENT_ALPHA),
-        settings,
-    )
+    calibration = calibrate(key, rgb, strength, np.asarray(reference.convert("RGBA"), dtype=np.float32), settings)
 
-    opaque, transparent = calibration.opaque_threshold, calibration.transparent_threshold
-    alpha = np.clip((transparent - strength) / (transparent - opaque), 0.0, 1.0)
-    # Remove key spill in proportion to transparency, but never push a color past neutral.
-    reduced = np.maximum(strength - (1.0 - alpha) * calibration.color_shift, np.minimum(strength, 0.0))
-    rgb[:, :, key.high] -= ((strength - reduced) * (key.contrast / 255.0))[:, :, None]
+    opaque = strength <= calibration.opaque_threshold
+    # Like a green-screen key, alpha falls with key dominance and reaches zero at the color shift (the measured background by default).
+    alpha = np.clip(1.0 - strength / max(calibration.color_shift, 1.0), 0.0, 1.0)
+    alpha = np.where(opaque, 1.0, np.where(strength >= calibration.transparent_threshold, 0.0, alpha))
+    alpha = np.round(alpha * 255.0) / 255.0
 
-    result = np.dstack((np.clip(rgb, 0, 255), alpha * 255.0))
+    # Partially transparent pixels are alpha * color + (1 - alpha) * rendered background; remove the background share.
+    background_rgb = np.asarray(calibration.background_color, dtype=np.float32)
+    unmixed = background_rgb + (rgb - background_rgb) / np.maximum(alpha, 1.0 / 255.0)[:, :, None]
+    # Fully transparent pixels keep a neutral color so that straight-alpha resampling shows no key fringe.
+    despilled = rgb.copy()
+    despilled[:, :, key.high] -= (np.maximum(strength, 0.0) * (key.contrast / 255.0))[:, :, None]
+    color = np.where(opaque[:, :, None], rgb, np.where((alpha > 0)[:, :, None], unmixed, despilled))
+
+    result = np.dstack((np.clip(color, 0, 255), alpha * 255.0))
     return Image.fromarray(np.round(result).astype(np.uint8), "RGBA"), calibration
 
 
