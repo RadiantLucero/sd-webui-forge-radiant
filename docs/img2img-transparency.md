@@ -123,6 +123,11 @@ results, click the desired image in the img2img gallery first. The raw images an
 their calibration references are kept in memory for up to two generation batches;
 restarting the application clears that cache.
 
+The output gallery and the full-page image viewer show a checkerboard behind
+images that contain transparent pixels, so transparency does not look like
+black on the dark background. The checkerboard is only drawn by the browser
+and is not part of the saved image.
+
 Reconstruction remains approximate: one RGB image does not uniquely determine
 alpha. Unmixing assumes that translucent content is not tinted toward the key,
 which is exact for white, gray, black, smoke, glass, and veils. Strongly colored
