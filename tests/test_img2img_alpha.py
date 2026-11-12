@@ -119,6 +119,35 @@ class Img2ImgAlphaTests(unittest.TestCase):
                 over_white = pixels[:, :3] * coverage + 255 * (1 - coverage)
                 self.assertTrue((np.abs(over_white - (alpha * np.array(color) + (1 - alpha) * 255)) <= 8).all())
 
+    def test_island_check_unmixes_opaque_spots_inside_translucent_areas(self):
+        source = np.zeros((24, 64, 4), np.uint8)
+        source[:, :16] = (*SUBJECT, 255)
+        source[:, 16:56] = (12, 12, 16, 199)
+        rendered = np.empty((24, 64, 3), np.uint8)
+        rendered[:] = KEY
+        rendered[:, :16] = SUBJECT
+        rendered[:, 16:56] = np.round(0.78 * np.array((12, 12, 16)) + 0.22 * np.array(KEY))
+        # A subject edge with slight key dominance borders the shadow on one side only.
+        rendered[:, 15] = (100, 112, 100)
+        spots = ((4, 24), (12, 36), (20, 46))
+        for spot in spots:
+            rendered[spot] = (10, 22, 10)
+        rendered[10:12, 28:30] = (20, 20, 20)
+
+        plain, calibration = run(source, rendered)
+        self.assertGreater(calibration.opaque_threshold, 12)
+        self.assertTrue(all((plain[spot] == (10, 22, 10, 255)).all() for spot in spots))
+
+        result, calibration = run(source, rendered, island_check=True)
+        self.assertEqual(calibration.island_pixels, len(spots))
+        self.assertEqual(calibration.infotext()["img2img alpha island"], "0 auto")
+        for spot in spots:
+            with self.subTest(spot=spot):
+                self.assertTrue(200 < result[spot][3] < 255)
+                self.assertLessEqual(ChromaKey(GREEN).strength(result[spot][:3]), 1)
+        self.assertTrue((result[10:12, 28:30] == (20, 20, 20, 255)).all())
+        self.assertTrue((result[:, :16] == plain[:, :16]).all())
+
     def test_original_alpha_contributes_only_statistics(self):
         source, rendered = scene()
         rendered[:, 16] = (100, 190, 60)
@@ -135,6 +164,8 @@ class Img2ImgAlphaTests(unittest.TestCase):
             AlphaSettings(mode="Reconstruct", opaque_threshold=120, transparent_threshold=120),
             AlphaSettings(mode="Reconstruct", opaque_threshold=255),
             AlphaSettings(mode="Reconstruct", opaque_threshold=254.5),
+            AlphaSettings(mode="Reconstruct", island_check=True, island_radius=0),
+            AlphaSettings(mode="Reconstruct", island_check=True, island_share=0),
             AlphaSettings(mode="Invalid"),
         ):
             with self.subTest(settings=settings), self.assertRaises(ValueError):

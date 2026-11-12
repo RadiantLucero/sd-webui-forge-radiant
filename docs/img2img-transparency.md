@@ -69,6 +69,23 @@ Each value has an **Auto** checkbox. Auto values are calculated per image:
   threshold below 32 leaves a narrower band).
 - *Color shift* is the dominance of the measured background.
 
+**Island check** (off by default) adds a second pass for opaque pixels that are
+mostly surrounded by partially or fully transparent pixels, such as dark spots
+inside a shadow or smoke whose dominance stays just below the partial
+threshold. For every opaque pixel, the pass counts the other pixels within
+**Island radius** in every direction (a square, clipped at the image border).
+If at least **Island surrounded share** of them are partially or fully
+transparent, the pixel uses **Island: partial transparency above key
+dominance** instead of the normal partial threshold and is unmixed like other
+partially transparent pixels. The decision uses the first pass only, so islands
+do not spread into each other. Auto uses the original's 99th percentile plus
+the tint without the noise margin, limited to the normal partial threshold, so
+colors that the subject itself contains stay opaque. Alpha still follows the
+pixel's own key dominance: the pass removes the key tint from such spots and
+makes them slightly transparent, but a nearly black pixel cannot become
+strongly transparent. The infotext and console statistics report the number of
+island pixels.
+
 Moving a slider switches its value to manual. After generation, the accordion
 lists the values used for every image, and Auto sliders show the values from
 the first image. **Use last calculated values** copies those values into the
@@ -80,14 +97,16 @@ alpha. Unmixing assumes that translucent content is not tinted toward the key,
 which is exact for white, gray, black, smoke, glass, and veils. Strongly colored
 soft edges, such as red or skin, become slightly too opaque and less saturated,
 and edges whose dominance stays below the partial threshold remain opaque. New
-content close to the key color can become partially transparent, and there is
-no neighborhood analysis.
+content close to the key color can become partially transparent. Apart from
+the optional island check, there is no neighborhood analysis.
 
 ## API
 
 The script is named `transparency`. Its `alwayson_scripts` arguments are:
 `enabled, mode, key_color, auto_key_color, opaque_auto, opaque,
-transparent_auto, transparent, color_shift_auto, color_shift`.
+transparent_auto, transparent, color_shift_auto, color_shift`, optionally
+followed by `island_check, island_auto, island, island_radius,
+island_share_percent`.
 
 ## Limits
 

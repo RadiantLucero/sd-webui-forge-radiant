@@ -10,7 +10,12 @@ THRESHOLD_KEYS = (
     ("opaque", "img2img alpha opaque", "Partial above"),
     ("transparent", "img2img alpha transparent", "Transparent from"),
     ("shift", "img2img alpha color shift", "Color shift"),
+    ("island", "img2img alpha island", "Island partial above"),
 )
+# Absent when the island check was off.
+OPTIONAL_KEYS = {"island"}
+ISLAND_RADIUS_KEY = "img2img alpha island radius"
+ISLAND_SHARE_KEY = "img2img alpha island share"
 
 
 def parse_threshold(text):
@@ -35,8 +40,8 @@ def last_calculated_values(generation_info):
             params = parse_generation_parameters(text)
         except Exception:
             continue
-        values = {name: parse_threshold(params[key]) for name, key, _ in THRESHOLD_KEYS if key in params}
-        if len(values) == len(THRESHOLD_KEYS) and all(values.values()):
+        values = {name: parse_threshold(params[key]) if key in params else None for name, key, _ in THRESHOLD_KEYS}
+        if all(values[name] for name, _, _ in THRESHOLD_KEYS if name not in OPTIONAL_KEYS):
             results.append((values, params.get("img2img alpha statistics", "")))
     return results
 
@@ -46,6 +51,8 @@ def describe(results):
         return "No reconstructed transparency in the last generation."
 
     def cell(value):
+        if value is None:
+            return "off"
         number, automatic = value
         return f"{number:.0f} (auto)" if automatic else f"{number:.0f}"
 
@@ -85,30 +92,42 @@ class ScriptImg2imgTransparency(scripts.Script):
 
                 sliders = {}
                 autos = {}
-                for name, minimum, maximum, value, label, info in (
-                    ("opaque", 0, 254, 40, "Partial transparency above key dominance", "pixels at or below this value stay fully opaque and unchanged"),
-                    ("transparent", 1, 255, 200, "Transparent from key dominance", "pixels at or above this value become fully transparent"),
-                    ("shift", 1, 255, 180, "Color shift", "key dominance of a fully transparent pixel when unmixing; lower values give more transparent edges tinted away from the key, higher values more opaque edges tinted toward it"),
-                ):
+
+                def threshold_row(name, minimum, maximum, value, label, info):
                     with gr.Row(equal_height=True):
                         autos[name] = gr.Checkbox(label="Auto", value=True, elem_id=self.elem_id(f"{name}_auto"), scale=0, min_width=80)
                         sliders[name] = gr.Slider(label=label, minimum=minimum, maximum=maximum, step=1, value=value, elem_id=self.elem_id(name), info=info, scale=1)
                     sliders[name].input(fn=lambda: False, outputs=[autos[name]], show_progress="hidden")
+
+                for spec in (
+                    ("opaque", 0, 254, 40, "Partial transparency above key dominance", "pixels at or below this value stay fully opaque and unchanged"),
+                    ("transparent", 1, 255, 200, "Transparent from key dominance", "pixels at or above this value become fully transparent"),
+                    ("shift", 1, 255, 180, "Color shift", "key dominance of a fully transparent pixel when unmixing; lower values give more transparent edges tinted away from the key, higher values more opaque edges tinted toward it"),
+                ):
+                    threshold_row(*spec)
+
+                island_check = gr.Checkbox(label="Island check", value=False, elem_id=self.elem_id("island_check"), info="second pass for opaque pixels that are mostly surrounded by partially or fully transparent pixels")
+                with gr.Column(visible=False) as island_controls:
+                    threshold_row("island", 0, 254, 0, "Island: partial transparency above key dominance", "lower partial threshold for these pixels; auto uses the subject's own key dominance without the noise margin")
+                    with gr.Row():
+                        island_radius = gr.Slider(label="Island radius", minimum=1, maximum=img2img_alpha.MAX_ISLAND_RADIUS, step=1, value=4, elem_id=self.elem_id("island_radius"), info="pixels checked in every direction around an opaque pixel")
+                        island_share = gr.Slider(label="Island surrounded share (%)", minimum=1, maximum=100, step=1, value=70, elem_id=self.elem_id("island_share"), info="minimum share of partially or fully transparent pixels around it")
 
                 self.calculated_values = gr.Markdown(describe([]), elem_id=self.elem_id("calculated_values"))
                 self.last_values = gr.State(None)
                 use_values = gr.Button("Use last calculated values", elem_id=self.elem_id("use_values"))
 
         mode.change(fn=lambda value: gr.update(visible=value == "Reconstruct"), inputs=[mode], outputs=[reconstruct_controls], show_progress="hidden")
+        island_check.change(fn=lambda value: gr.update(visible=bool(value)), inputs=[island_check], outputs=[island_controls], show_progress="hidden")
 
         names = [name for name, _, _ in THRESHOLD_KEYS]
         self.auto_inputs = [autos[name] for name in names]
         self.slider_outputs = [sliders[name] for name in names]
 
         def use_last_values(values):
-            if not values:
-                return [gr.skip()] * (len(names) * 2)
-            return [gr.update(value=min(max(values[name], sliders[name].minimum), sliders[name].maximum)) for name in names] + [False] * len(names)
+            values = values or {}
+            updates = [gr.skip() if values.get(name) is None else gr.update(value=min(max(values[name], sliders[name].minimum), sliders[name].maximum)) for name in names]
+            return updates + [gr.skip() if values.get(name) is None else False for name in names]
 
         use_values.click(fn=use_last_values, inputs=[self.last_values], outputs=self.slider_outputs + self.auto_inputs, show_progress="hidden")
 
@@ -125,17 +144,34 @@ class ScriptImg2imgTransparency(scripts.Script):
             colors = params.get("img2img alpha background")
             return colors.split(",")[0].strip() if colors else None
 
+        def paste_number(key, slider, suffix=""):
+            def paste(params):
+                try:
+                    value = float(str(params[key]).strip().removesuffix(suffix))
+                except (KeyError, ValueError):
+                    return None
+                return min(max(value, slider.minimum), slider.maximum)
+
+            return paste
+
         self.infotext_fields = [
             PasteField(enable, lambda params: "img2img alpha" in params),
             PasteField(mode, lambda params: params.get("img2img alpha")),
             PasteField(key_color, paste_key_color),
             PasteField(auto_key, lambda params: False if "img2img alpha background" in params else None),
+            PasteField(island_check, lambda params: "img2img alpha island" in params if "img2img alpha" in params else None),
+            PasteField(island_radius, paste_number(ISLAND_RADIUS_KEY, island_radius)),
+            PasteField(island_share, paste_number(ISLAND_SHARE_KEY, island_share, "%")),
         ]
         for name, key, _ in THRESHOLD_KEYS:
             self.infotext_fields.append(PasteField(sliders[name], paste_threshold(key, sliders[name])))
             self.infotext_fields.append(PasteField(autos[name], paste_threshold(key, None)))
 
-        return [enable, mode, key_color, auto_key, autos["opaque"], sliders["opaque"], autos["transparent"], sliders["transparent"], autos["shift"], sliders["shift"]]
+        return [
+            enable, mode, key_color, auto_key,
+            autos["opaque"], sliders["opaque"], autos["transparent"], sliders["transparent"], autos["shift"], sliders["shift"],
+            island_check, autos["island"], sliders["island"], island_radius, island_share,
+        ]
 
     def connect_generation_info(self, component):
         generation_info = component.component
@@ -145,8 +181,8 @@ class ScriptImg2imgTransparency(scripts.Script):
             if not results:
                 return [describe(results), None] + [gr.skip()] * len(THRESHOLD_KEYS)
 
-            first = {name: value for name, (value, _) in results[0][0].items()}
-            sliders = [gr.update(value=min(max(first[name], slider.minimum), slider.maximum)) if auto else gr.skip() for (name, _, _), slider, auto in zip(THRESHOLD_KEYS, self.slider_outputs, automatic)]
+            first = {name: value[0] for name, value in results[0][0].items() if value is not None}
+            sliders = [gr.update(value=min(max(first[name], slider.minimum), slider.maximum)) if auto and name in first else gr.skip() for (name, _, _), slider, auto in zip(THRESHOLD_KEYS, self.slider_outputs, automatic)]
             return [describe(results), first] + sliders
 
         generation_info.change(
@@ -156,7 +192,7 @@ class ScriptImg2imgTransparency(scripts.Script):
             show_progress="hidden",
         )
 
-    def setup(self, p, enable, mode, key_color, auto_key, opaque_auto, opaque, transparent_auto, transparent, shift_auto, shift):
+    def setup(self, p, enable, mode, key_color, auto_key, opaque_auto, opaque, transparent_auto, transparent, shift_auto, shift, island_check=False, island_auto=True, island=0, island_radius=4, island_share=70):
         p.img2img_alpha_settings = img2img_alpha.AlphaSettings(
             mode=mode if enable else "Off",
             key_color=key_color or img2img_alpha.DEFAULT_KEY_COLOR,
@@ -164,4 +200,8 @@ class ScriptImg2imgTransparency(scripts.Script):
             opaque_threshold=None if opaque_auto else float(opaque),
             transparent_threshold=None if transparent_auto else float(transparent),
             color_shift=None if shift_auto else float(shift),
+            island_check=bool(island_check),
+            island_threshold=None if island_auto else float(island),
+            island_radius=int(island_radius),
+            island_share=float(island_share) / 100,
         )
