@@ -19,6 +19,7 @@ from modules import (
     errors,
     images,
     processing,
+    prompt_wildcards,
     scripts,
     sd_samplers,
     sd_schedulers,
@@ -63,11 +64,13 @@ def apply_field(field: str):
 
 
 def apply_prompt(p: StableDiffusionProcessing, x: str, xs: list[str]):
-    if xs[0] not in p.prompt and xs[0] not in p.negative_prompt:
-        raise RuntimeError(f'Prompt S/R did not find "{xs[0]}" in either prompt or negative prompt...')
+    # Resolved wildcard values keep their original search text, which may itself be a wildcard.
+    search = getattr(xs, "search", xs[0])
+    if search not in p.prompt and search not in p.negative_prompt:
+        raise RuntimeError(f'Prompt S/R did not find "{search}" in either prompt or negative prompt...')
 
-    p.prompt = p.prompt.replace(xs[0], x)
-    p.negative_prompt = p.negative_prompt.replace(xs[0], x)
+    p.prompt = p.prompt.replace(search, x)
+    p.negative_prompt = p.negative_prompt.replace(search, x)
 
 
 def apply_order(p: StableDiffusionProcessing, x: list[str], _):
@@ -658,6 +661,9 @@ class Script(scripts.Script):
         if not opts.return_grid:
             p.batch_size = 1
 
+        # Dynamic Prompts would draw wildcards in Prompt S/R values again for every cell; resolve them once for the grid.
+        wildcards = prompt_wildcards.create_resolver(p, opts)
+
         def process_axis(opt, vals, vals_dropdown):
             if opt.label == "Nothing":
                 return [0]
@@ -721,6 +727,9 @@ class Script(scripts.Script):
                 valslist = list(permutations(valslist))
 
             valslist = [opt.type(x) for x in valslist]
+
+            if wildcards is not None and opt.apply is apply_prompt and valslist:
+                valslist = wildcards.resolve_values(valslist)
 
             # Confirm options are valid before starting
             if opt.confirm:
@@ -857,12 +866,16 @@ class Script(scripts.Script):
                 if x_opt.label != "Nothing":
                     pc.extra_generation_params["X Type"] = x_opt.label
                     pc.extra_generation_params["X Values"] = x_values
+                    if isinstance(xs, prompt_wildcards.PromptValues):
+                        pc.extra_generation_params["X Resolved Values"] = list_to_csv_string(xs)
                     if x_opt.label in ["Seed", "Var. seed"] and not no_fixed_seeds:
                         pc.extra_generation_params["Fixed X Values"] = ", ".join([str(x) for x in xs])
 
                 if y_opt.label != "Nothing":
                     pc.extra_generation_params["Y Type"] = y_opt.label
                     pc.extra_generation_params["Y Values"] = y_values
+                    if isinstance(ys, prompt_wildcards.PromptValues):
+                        pc.extra_generation_params["Y Resolved Values"] = list_to_csv_string(ys)
                     if y_opt.label in ["Seed", "Var. seed"] and not no_fixed_seeds:
                         pc.extra_generation_params["Fixed Y Values"] = ", ".join([str(y) for y in ys])
 
@@ -875,6 +888,8 @@ class Script(scripts.Script):
                 if z_opt.label != "Nothing":
                     pc.extra_generation_params["Z Type"] = z_opt.label
                     pc.extra_generation_params["Z Values"] = z_values
+                    if isinstance(zs, prompt_wildcards.PromptValues):
+                        pc.extra_generation_params["Z Resolved Values"] = list_to_csv_string(zs)
                     if z_opt.label in ["Seed", "Var. seed"] and not no_fixed_seeds:
                         pc.extra_generation_params["Fixed Z Values"] = ", ".join([str(z) for z in zs])
 
