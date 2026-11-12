@@ -101,6 +101,14 @@ def validate_native_vae(vae):
 MODES = ("Off", "Native", "Reconstruct")
 DEFAULT_KEY_COLOR = "#00ff00"
 KEY_CANDIDATES = ((0, 255, 0), (255, 0, 255), (0, 0, 255), (255, 0, 0), (0, 255, 255), (255, 255, 0))
+# Generators keep the familiar green screen flat far more reliably than other fills, which they tend to reinterpret as lit scenery.
+PREFERRED_KEYS = ((0, 255, 0), (255, 0, 255))
+# A preferred key is kept while the visible input leans toward it by at most a quarter of the pure key.
+MAX_PREFERRED_KEY_LEAN = 64
+# Automatic neighbor hue weights, tried in order only when the strict key finds no background.
+NEIGHBOR_STEPS = (0.25, 0.5, 0.75, 1.0)
+# Share of the visible input that must stay below the partial band before neighbor hues are counted toward the key.
+NEIGHBOR_SUBJECT_QUANTILE = 0.999
 MIN_KEY_CONTRAST = 128
 BACKGROUND_SEARCH_START = 96
 BACKGROUND_WINDOW = 32
@@ -126,6 +134,7 @@ class AlphaSettings:
     opaque_threshold: float | None = None
     transparent_threshold: float | None = None
     color_shift: float | None = None
+    neighbor_weight: float | None = None
     island_check: bool = False
     island_threshold: float | None = None
     island_radius: int = 4
@@ -145,6 +154,8 @@ class AlphaSettings:
             raise ValueError("The img2img transparency opaque threshold must be at most 254.")
         if self.opaque_threshold is not None and self.transparent_threshold is not None and self.opaque_threshold >= self.transparent_threshold:
             raise ValueError("The img2img transparency opaque threshold must be lower than the transparent threshold.")
+        if self.neighbor_weight is not None and not 0 <= self.neighbor_weight <= 1:
+            raise ValueError("The img2img transparency neighbor hues must be between 0% and 100%.")
         if self.island_check:
             if self.island_threshold is not None and not 0 <= self.island_threshold <= 254:
                 raise ValueError("The img2img transparency island threshold must be between 0 and 254.")
@@ -157,7 +168,7 @@ class AlphaSettings:
 
 @dataclass(frozen=True)
 class Calibration:
-    """Thresholds in key-dominance units: 0 is neutral and 255 is the pure key color."""
+    """Thresholds in key-dominance units at the neighbor hue weight: 0 is neutral and 255 is the pure key color."""
 
     opaque_threshold: float
     transparent_threshold: float
@@ -181,12 +192,15 @@ class Calibration:
     island_smoke: bool = False
     island_pixels: int = 0
     island_smoke_pixels: int = 0
+    neighbor_weight: float = 0.0
+    auto_neighbor: bool = False
 
     def infotext(self):
         def value(number, automatic):
             return f"{number:.0f} auto" if automatic else f"{number:.0f}"
 
         info = {
+            "img2img alpha neighbor hues": value(self.neighbor_weight * 100, self.auto_neighbor),
             "img2img alpha opaque": value(self.opaque_threshold, self.auto_opaque),
             "img2img alpha transparent": value(self.transparent_threshold, self.auto_transparent),
             "img2img alpha color shift": value(self.color_shift, self.auto_color_shift),
@@ -224,9 +238,18 @@ class ChromaKey:
         if self.contrast < MIN_KEY_CONTRAST:
             raise ValueError(f"Alpha reconstruction requires a saturated key color such as #00ff00; {format_color(self.color)} has a key contrast of {self.contrast:.0f}, at least {MIN_KEY_CONTRAST} is required.")
 
-    def strength(self, rgb):
+    def strength(self, rgb, neighbor=0.0):
+        """Key dominance; ``neighbor`` from 0 to 1 also counts hues next to the key toward it, such as yellow and cyan for green.
+
+        At 0 the key channels are compared with the strongest other channel, so neighboring hues are neutral; at 1 the strongest
+        key channel is compared with the weakest other channel. Neutral colors stay at 0 and the pure key at 255 for every weight.
+        """
         rgb = np.asarray(rgb, dtype=np.float32)
-        return (rgb[..., self.high].min(axis=-1) - rgb[..., ~self.high].max(axis=-1)) * (255.0 / self.contrast)
+        return self._lean(rgb, neighbor) * (255.0 / self._lean(np.asarray(self.color, dtype=np.float32), neighbor))
+
+    def _lean(self, rgb, neighbor):
+        high, low = rgb[..., self.high], rgb[..., ~self.high]
+        return (1 - neighbor) * high.min(axis=-1) + neighbor * high.max(axis=-1) - ((1 - neighbor) * low.max(axis=-1) + neighbor * low.min(axis=-1))
 
 
 def format_color(color):
@@ -244,8 +267,11 @@ def background_color(image, configured_color, automatic):
     if not len(visible):
         return ChromaKey(ImageColor.getrgb(configured_color)).color
 
-    # Reconstruction separates by key strength, so pick the key the visible content leans toward least.
-    scores = [np.percentile(ChromaKey(candidate).strength(visible), 99) for candidate in KEY_CANDIDATES]
+    # Reconstruction separates by key strength, so the visible content must lean toward the key as little as possible.
+    scores = [float(np.percentile(ChromaKey(candidate).strength(visible), 99)) for candidate in KEY_CANDIDATES]
+    for preferred in PREFERRED_KEYS:
+        if scores[KEY_CANDIDATES.index(preferred)] <= MAX_PREFERRED_KEY_LEAN:
+            return preferred
     return KEY_CANDIDATES[int(np.argmin(scores))]
 
 
@@ -261,15 +287,34 @@ def _window_sum(values, radius):
     return integral[size:, size:] - integral[:-size, size:] - integral[size:, :-size] + integral[:-size, :-size]
 
 
-def calibrate(key, rgb, strength, original, settings):
+def calibrate(key, rgb, original, settings):
     """Derive thresholds from the generated key-dominance histogram and global original statistics."""
     settings.validate()
+    rgb = np.asarray(rgb, dtype=np.float32)
+    original = np.asarray(original, dtype=np.float32)
+    if settings.neighbor_weight is not None:
+        return _calibrate(key, settings.neighbor_weight, rgb, original, settings)[0]
+
+    strict, _ = _calibrate(key, 0.0, rgb, original, settings)
+    if strict.background_level is None:
+        # Without any background in the key, the generator may have shifted it toward a neighboring hue, such as green toward yellow.
+        # Count neighboring hues only as far as needed to find a background that the visible input stays clear of.
+        for neighbor in NEIGHBOR_STEPS:
+            calibration, separated = _calibrate(key, neighbor, rgb, original, settings)
+            if separated:
+                return calibration
+    return strict
+
+
+def _calibrate(key, neighbor, rgb, original, settings):
+    """Calibrate at one neighbor hue weight; also report whether a background was found clear of the visible input."""
+    strength = key.strength(rgb, neighbor)
     # Use the same upper bound for the histogram and its samples when the result exceeds the key's saturation.
-    values = np.minimum(np.asarray(strength, dtype=np.float32).ravel(), 255.0)
-    colors = np.asarray(rgb, dtype=np.float32).reshape(-1, 3)
-    original = np.asarray(original, dtype=np.float32).reshape(-1, 4)
+    values = np.minimum(strength.ravel(), 255.0)
+    colors = rgb.reshape(-1, 3)
+    original = original.reshape(-1, 4)
     visible = original[:, 3] >= VISIBLE_ALPHA
-    original_strength = np.sort(key.strength(original[visible, :3]))
+    original_strength = np.sort(key.strength(original[visible, :3], neighbor))
     # Compare only the least key-like pixels that the original's opaque area accounts for in both images,
     # so partially transparent pixels cannot pass for a key-tinted subject.
     original_opaque = original_strength[: math.ceil(original_strength.size * FOREGROUND_SAMPLE)]
@@ -317,14 +362,20 @@ def calibrate(key, rgb, strength, original, settings):
     auto_transparent = 255.0 if background_level is None else float(np.clip(round(background_level - 3 * background_spread), 64, 255))
     transparent = auto_transparent if settings.transparent_threshold is None else float(settings.transparent_threshold)
 
-    auto_opaque = max(min(max(round(upper + max(12.0, 2 * noise)), 16.0), transparent - MIN_PARTIAL_BAND), 0.0)
+    subject_opaque = max(round(upper + max(12.0, 2 * noise)), 16.0)
+    auto_opaque = max(min(subject_opaque, transparent - MIN_PARTIAL_BAND), 0.0)
     opaque = auto_opaque if settings.opaque_threshold is None else float(settings.opaque_threshold)
     if settings.transparent_threshold is None and opaque >= transparent:
         transparent = opaque + 1
     if opaque >= transparent:
         raise ValueError(f"The img2img transparency opaque threshold ({opaque:.0f}) must be lower than the transparent threshold ({transparent:.0f}).")
 
-    auto_shift = float(max(round(float(key.strength(background_rgb))), 1))
+    subject_top = subject_opaque
+    if original_strength.size:
+        subject_top = max(subject_top, float(np.quantile(original_strength, NEIGHBOR_SUBJECT_QUANTILE)) + tint)
+    separated = background_level is not None and subject_top + MIN_PARTIAL_BAND <= auto_transparent
+
+    auto_shift = float(max(round(float(key.strength(background_rgb, neighbor))), 1))
     shift = auto_shift if settings.color_shift is None else float(settings.color_shift)
 
     island = None
@@ -352,7 +403,9 @@ def calibrate(key, rgb, strength, original, settings):
         island_radius=int(settings.island_radius),
         island_share=float(settings.island_share),
         island_smoke=island is not None and bool(settings.island_smoke),
-    )
+        neighbor_weight=float(neighbor),
+        auto_neighbor=settings.neighbor_weight is None,
+    ), separated
 
 
 def reconstruct(image, reference, background, settings=None):
@@ -366,8 +419,9 @@ def reconstruct(image, reference, background, settings=None):
     settings = settings or AlphaSettings(mode="Reconstruct")
     key = ChromaKey(background)
     rgb = np.asarray(image.convert("RGB"), dtype=np.float32)
-    strength = key.strength(rgb)
-    calibration = calibrate(key, rgb, strength, np.asarray(reference.convert("RGBA"), dtype=np.float32), settings)
+    calibration = calibrate(key, rgb, np.asarray(reference.convert("RGBA"), dtype=np.float32), settings)
+    neighbor = calibration.neighbor_weight
+    strength = key.strength(rgb, neighbor)
 
     opaque = strength <= calibration.opaque_threshold
     transparent = strength >= calibration.transparent_threshold
@@ -405,13 +459,14 @@ def reconstruct(image, reference, background, settings=None):
     if smoke.any():
         # Dark smoke often dims the rendered key behind it; remove only the key share the pixel shows, so it does not turn away from the key.
         background_share = 1.0 - alpha
-        dimming = np.clip(np.maximum(strength, 0.0) / np.maximum(background_share * max(float(key.strength(background_rgb)), 1.0), 1e-6), 0.0, 1.0)
+        dimming = np.clip(np.maximum(strength, 0.0) / np.maximum(background_share * max(float(key.strength(background_rgb, neighbor)), 1.0), 1e-6), 0.0, 1.0)
         smoke_color = (rgb - (background_share * dimming)[:, :, None] * background_rgb) / coverage
+        # Despill with the strict key so that neighboring hues keep their own hue instead of turning away from the key.
         smoke_color[:, :, key.high] -= (np.maximum(key.strength(smoke_color), 0.0) * (key.contrast / 255.0))[:, :, None]
         unmixed = np.where(smoke[:, :, None], smoke_color, unmixed)
     # Fully transparent pixels keep a neutral color so that straight-alpha resampling shows no key fringe.
     despilled = rgb.copy()
-    despilled[:, :, key.high] -= (np.maximum(strength, 0.0) * (key.contrast / 255.0))[:, :, None]
+    despilled[:, :, key.high] -= (np.maximum(key.strength(rgb) if neighbor else strength, 0.0) * (key.contrast / 255.0))[:, :, None]
     color = np.where(opaque[:, :, None], rgb, np.where((alpha > 0)[:, :, None], unmixed, despilled))
 
     result = np.dstack((np.clip(color, 0, 255), alpha * 255.0))

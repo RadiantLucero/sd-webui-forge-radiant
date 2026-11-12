@@ -215,7 +215,7 @@ class TransparencyCallbackTests(unittest.TestCase):
         script = script_type.__new__(script_type)
         self.scope = scope
         self.script = script
-        self.settings = ["#00ff00", False, False, 40, False, 200, False, 255, False, False, 0, 4, 70, True]
+        self.settings = ["#00ff00", False, False, 40, False, 200, False, 255, False, False, 0, 4, 70, True, False, 50]
         with gr.Blocks(analytics_enabled=False):
             script.gallery = gr.Gallery(type="pil", format="png")
             script.gallery.GRADIO_CACHE = self.directory
@@ -223,8 +223,8 @@ class TransparencyCallbackTests(unittest.TestCase):
             script.calculated_values = gr.Markdown()
             script.last_values = gr.State()
             script.cache_status = gr.Textbox()
-            script.auto_inputs = [gr.Checkbox() for _ in range(4)]
-            script.slider_outputs = [gr.Slider() for _ in range(4)]
+            script.auto_inputs = [gr.Checkbox() for _ in scope["THRESHOLD_KEYS"]]
+            script.slider_outputs = [gr.Slider() for _ in scope["THRESHOLD_KEYS"]]
             script.reconstruct_button = gr.Button()
             script.save_original_button = gr.Button()
             script.reconstruction_inputs = [
@@ -288,6 +288,7 @@ class TransparencyCallbackTests(unittest.TestCase):
                 self.assertEqual(result.mode, "RGBA")
                 self.assertEqual(result.getpixel((0, 0))[3], 0 if raw_index == 0 else 255)
                 self.assertIn("img2img alpha opaque: 40", json.loads(info)["infotexts"][raw_index + 1])
+                self.assertIn("img2img alpha neighbor hues: 50", json.loads(info)["infotexts"][raw_index + 1])
                 self.invoke(self.save, index)
                 with Image.open(self.saved_path) as saved:
                     self.assertEqual(saved.tobytes(), self.raw[raw_index].tobytes())

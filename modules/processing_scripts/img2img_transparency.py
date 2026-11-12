@@ -15,13 +15,16 @@ RECONSTRUCTION_CACHE_INDICES_KEY = "img2img alpha reconstruction cache indices"
 RECONSTRUCTION_CACHE = img2img_alpha.ReconstructionCache()
 
 THRESHOLD_KEYS = (
+    ("neighbor", "img2img alpha neighbor hues", "Neighbor hues"),
     ("opaque", "img2img alpha opaque", "Partial above"),
     ("transparent", "img2img alpha transparent", "Transparent from"),
     ("shift", "img2img alpha color shift", "Color shift"),
     ("island", "img2img alpha island", "Island partial above"),
 )
-# Absent when the island check was off.
-OPTIONAL_KEYS = {"island"}
+# Absent when the island check was off, or from infotexts written before neighbor hues existed.
+OPTIONAL_KEYS = {"island", "neighbor"}
+# Reconstructions from before neighbor hues existed always used the strict key.
+LEGACY_THRESHOLDS = {"neighbor": (0.0, False)}
 ISLAND_RADIUS_KEY = "img2img alpha island radius"
 ISLAND_SHARE_KEY = "img2img alpha island share"
 ISLAND_SMOKE_KEY = "img2img alpha island smoke"
@@ -138,11 +141,11 @@ class ScriptImg2imgTransparency(scripts.Script):
             )
 
             with gr.Column(visible=True) as reconstruct_controls:
-                gr.Markdown("Thresholds use key dominance: how far the key color's channels exceed the others, from 0 for a neutral color to 255 for the pure key color. For green this is G - max(R, B). Partially transparent pixels are unmixed from the background color measured in the result. Auto values are calculated for every image from the result and the color statistics of the input.")
+                gr.Markdown("Thresholds use key dominance: how far the key color's channels exceed the others, from 0 for a neutral color to 255 for the pure key color. For green this is G - max(R, B); neighbor hues move it toward G - min(R, B). Partially transparent pixels are unmixed from the background color measured in the result. Auto values are calculated for every image from the result and the color statistics of the input.")
                 gr.Markdown("The raw generated RGB image is kept in a short-lived cache so you can adjust these settings and reconstruct it again without another generation.")
                 with gr.Row():
                     key_color = FormColorPicker(label="Key color", value=img2img_alpha.DEFAULT_KEY_COLOR, elem_id=self.elem_id("key_color"))
-                    auto_key = gr.Checkbox(label="Auto key color", value=False, elem_id=self.elem_id("auto_key"), info="choose the saturated color least present in the visible input")
+                    auto_key = gr.Checkbox(label="Auto key color", value=False, elem_id=self.elem_id("auto_key"), info="green, else magenta, unless the visible input leans toward it; otherwise the saturated color least present in the visible input")
 
                 sliders = {}
                 autos = {}
@@ -154,6 +157,7 @@ class ScriptImg2imgTransparency(scripts.Script):
                     sliders[name].input(fn=lambda: False, outputs=[autos[name]], show_progress="hidden")
 
                 for spec in (
+                    ("neighbor", 0, 100, 0, "Neighbor hues (%)", "also count hues next to the key toward it, such as yellow and cyan for green, when the result shifted the key; auto stays at 0 unless no background is found otherwise and the visible input stays clear of these hues"),
                     ("opaque", 0, 254, 40, "Partial transparency above key dominance", "pixels at or below this value stay fully opaque and unchanged"),
                     ("transparent", 1, 255, 200, "Transparent from key dominance", "pixels at or above this value become fully transparent"),
                     ("shift", 1, 255, 180, "Color shift", "key dominance of a fully transparent pixel when unmixing; lower values give more transparent edges tinted away from the key, higher values more opaque edges tinted toward it"),
@@ -188,6 +192,7 @@ class ScriptImg2imgTransparency(scripts.Script):
             autos["transparent"], sliders["transparent"],
             autos["shift"], sliders["shift"],
             island_check, autos["island"], sliders["island"], island_radius, island_share, island_smoke,
+            autos["neighbor"], sliders["neighbor"],
         ]
 
         def use_last_values(values):
@@ -197,9 +202,12 @@ class ScriptImg2imgTransparency(scripts.Script):
 
         use_values.click(fn=use_last_values, inputs=[self.last_values], outputs=self.slider_outputs + self.auto_inputs, show_progress="hidden")
 
-        def paste_threshold(key, slider):
+        def paste_threshold(key, slider, legacy=None):
             def paste(params):
-                value = parse_threshold(params[key]) if key in params else None
+                if key in params:
+                    value = parse_threshold(params[key])
+                else:
+                    value = legacy if "img2img alpha opaque" in params else None
                 if value is None:
                     return None
                 return value[1] if slider is None else min(max(value[0], slider.minimum), slider.maximum)
@@ -231,13 +239,15 @@ class ScriptImg2imgTransparency(scripts.Script):
             PasteField(island_smoke, lambda params: params.get(ISLAND_SMOKE_KEY) == "on" if "img2img alpha island" in params else None),
         ]
         for name, key, _ in THRESHOLD_KEYS:
-            self.infotext_fields.append(PasteField(sliders[name], paste_threshold(key, sliders[name])))
-            self.infotext_fields.append(PasteField(autos[name], paste_threshold(key, None)))
+            legacy = LEGACY_THRESHOLDS.get(name)
+            self.infotext_fields.append(PasteField(sliders[name], paste_threshold(key, sliders[name], legacy)))
+            self.infotext_fields.append(PasteField(autos[name], paste_threshold(key, None, legacy)))
 
         return [
             enable, mode, key_color, auto_key,
             autos["opaque"], sliders["opaque"], autos["transparent"], sliders["transparent"], autos["shift"], sliders["shift"],
             island_check, autos["island"], sliders["island"], island_radius, island_share, island_smoke,
+            autos["neighbor"], sliders["neighbor"],
         ]
 
     def connect_generation_info(self, component):
@@ -336,6 +346,8 @@ class ScriptImg2imgTransparency(scripts.Script):
         island_radius,
         island_share,
         island_smoke,
+        neighbor_auto,
+        neighbor,
         gallery_index,
     ):
         info, cached, infotext_index, gallery_index = self.get_cached_source(generation_info, gallery_index)
@@ -346,6 +358,7 @@ class ScriptImg2imgTransparency(scripts.Script):
             opaque_threshold=None if opaque_auto else float(opaque),
             transparent_threshold=None if transparent_auto else float(transparent),
             color_shift=None if shift_auto else float(shift),
+            neighbor_weight=None if neighbor_auto else float(neighbor) / 100,
             island_check=bool(island_check),
             island_threshold=None if island_auto else float(island),
             island_radius=int(island_radius),
@@ -409,7 +422,7 @@ class ScriptImg2imgTransparency(scripts.Script):
         )
         return gr.update(value=f"Saved raw generated image to {filename}", visible=True)
 
-    def setup(self, p, enable, mode, key_color, auto_key, opaque_auto, opaque, transparent_auto, transparent, shift_auto, shift, island_check=False, island_auto=True, island=0, island_radius=4, island_share=70, island_smoke=True):
+    def setup(self, p, enable, mode, key_color, auto_key, opaque_auto, opaque, transparent_auto, transparent, shift_auto, shift, island_check=False, island_auto=True, island=0, island_radius=4, island_share=70, island_smoke=True, neighbor_auto=True, neighbor=0):
         p.img2img_alpha_settings = img2img_alpha.AlphaSettings(
             mode=mode if enable else "Off",
             key_color=key_color or img2img_alpha.DEFAULT_KEY_COLOR,
@@ -417,6 +430,7 @@ class ScriptImg2imgTransparency(scripts.Script):
             opaque_threshold=None if opaque_auto else float(opaque),
             transparent_threshold=None if transparent_auto else float(transparent),
             color_shift=None if shift_auto else float(shift),
+            neighbor_weight=None if neighbor_auto else float(neighbor) / 100,
             island_check=bool(island_check),
             island_threshold=None if island_auto else float(island),
             island_radius=int(island_radius),

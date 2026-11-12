@@ -1100,9 +1100,9 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
                     p.alpha_raw_images.append(image.copy())
                     image, calibration = img2img_alpha.reconstruct(image, p.alpha_references[i], p.alpha_backgrounds[i], p.img2img_alpha_settings)
                     p.extra_generation_params.update(calibration.infotext())
-                    logger.info(f"img2img alpha image {i + 1}: opaque {calibration.opaque_threshold:.0f}, transparent {calibration.transparent_threshold:.0f}, color shift {calibration.color_shift:.0f}; {calibration.statistics()}")
+                    logger.info(f"img2img alpha image {i + 1}: neighbor hues {calibration.neighbor_weight:.0%}, opaque {calibration.opaque_threshold:.0f}, transparent {calibration.transparent_threshold:.0f}, color shift {calibration.color_shift:.0f}; {calibration.statistics()}")
                     if calibration.background_level is None and calibration.original_transparent_fraction >= 0.05:
-                        logger.warning(f"img2img alpha image {i + 1}: the input was {calibration.original_transparent_fraction:.0%} transparent, but no key-colored background was found in the result.")
+                        logger.warning(f"img2img alpha image {i + 1}: the input was {calibration.original_transparent_fraction:.0%} transparent, but no key-colored background was found in the result. If the background shifted toward a neighboring hue, raise Neighbor hues.")
 
                 mask_for_overlay = getattr(p, "mask_for_overlay", None)
 
