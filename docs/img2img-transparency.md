@@ -21,8 +21,12 @@ overlay mask to keep the original outside the edited area.
 The key color must be saturated: at least one channel must be 128 or higher,
 at least one must be lower, and the gap between them must be at least 128.
 Gray, white, and black cannot be separated from neutral content. **Auto key
-color** chooses the green, magenta, blue, red, cyan, or yellow key that the
-visible input leans toward least.
+color** prefers green, because generators keep a green screen flat most
+reliably, and falls back to magenta when the visible input leans toward green
+by more than 64 (a quarter of the pure key). If the input also leans that far
+toward magenta, it chooses the green, magenta, blue, red, cyan, or yellow key
+that the visible input leans toward least. Other fills are often reinterpreted
+as lit scenery, such as a dark red room for magenta.
 
 Thresholds use **key dominance**: the lowest key channel minus the highest
 non-key channel, scaled so that the pure key color is 255. For green this is
@@ -30,6 +34,24 @@ non-key channel, scaled so that the pure key color is 255. For green this is
 negative. Content should not be strongly dominated by the key color, so
 dominance separates the subject from the background.
 
+- **Neighbor hues**: the generator may shift the key toward a neighboring hue,
+  such as green toward lime or yellow (`251, 255, 88`). Strict dominance treats
+  such a pixel as neutral (4), so no threshold can make it transparent. This
+  weight moves the metric from `G - max(R, B)` at 0% toward `G - min(R, B)` at
+  100%, where the same pixel reaches 167. Neutral colors stay at 0 and the pure
+  key at 255. For two-channel keys such as magenta, the key channels are
+  weighted instead, so red and blue count toward it. All other thresholds,
+  including manual values, use the metric at the selected weight. Fully
+  transparent pixels are still despilled with strict dominance, so they keep
+  their own hue instead of turning red.
+  Auto stays at 0% unless strict dominance finds no background. It then tries
+  25%, 50%, 75%, and 100% and uses the first weight that finds a background
+  while both the auto *Partial transparency above* value and the 99.9th
+  percentile of the visible input (alpha of at least 242) plus the tint stay at
+  least 32 below the auto *Transparent from* value. Partially transparent input
+  such as smoke is not part of this check. If no weight qualifies, auto keeps
+  0%. Raise the weight manually when the subject itself contains neighbor hues;
+  content in those hues may then become partially transparent.
 - **Partial transparency above key dominance**: pixels at or below this value
   stay fully opaque and unchanged. A mix such as half red and half green is not
   dominant enough and stays opaque.
@@ -108,7 +130,8 @@ Moving a slider switches its value to manual. After generation, the accordion
 lists the values used for every image, and Auto sliders show the values from
 the first image. **Use last calculated values** copies those values into the
 sliders as manual values. The values and statistics are also written to the
-infotext and console log.
+infotext and console log. Pasting an infotext from before neighbor hues existed
+sets **Neighbor hues** to a manual 0%, which reproduces its reconstruction.
 
 Select a generated image in the img2img output gallery, adjust the settings, and
 use **Reconstruct with current settings** to rebuild its alpha without another
@@ -142,7 +165,8 @@ The script is named `transparency`. Its `alwayson_scripts` arguments are:
 `enabled, mode, key_color, auto_key_color, opaque_auto, opaque,
 transparent_auto, transparent, color_shift_auto, color_shift`, optionally
 followed by `island_check, island_auto, island, island_radius,
-island_share_percent, island_smoke`.
+island_share_percent, island_smoke, neighbor_auto, neighbor_percent`. Omitted
+neighbor values use Auto.
 
 ## Limits
 

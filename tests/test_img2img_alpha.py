@@ -198,6 +198,7 @@ class Img2ImgAlphaTests(unittest.TestCase):
             AlphaSettings(mode="Reconstruct", opaque_threshold=254.5),
             AlphaSettings(mode="Reconstruct", island_check=True, island_radius=0),
             AlphaSettings(mode="Reconstruct", island_check=True, island_share=0),
+            AlphaSettings(mode="Reconstruct", neighbor_weight=1.5),
             AlphaSettings(mode="Invalid"),
         ):
             with self.subTest(settings=settings), self.assertRaises(ValueError):
@@ -251,6 +252,42 @@ class Img2ImgAlphaTests(unittest.TestCase):
         self.assertEqual(background_color(source, "#0000ff", False), (0, 0, 255))
         with self.assertRaisesRegex(ValueError, "saturated key color"):
             background_color(source, "#808080", False)
+
+    def test_automatic_key_color_prefers_green_then_magenta(self):
+        for pixels, expected in (
+            # Teal leans toward green only slightly, so green is kept although other colors are absent entirely.
+            ([(57, 197, 187, 255), (255, 0, 255, 0)], (0, 255, 0)),
+            ([(30, 220, 40, 255), (220, 40, 200, 255)], (0, 0, 255)),
+        ):
+            with self.subTest(pixels=pixels):
+                source = Image.new("RGBA", (2, 1))
+                source.putdata(pixels)
+                self.assertEqual(background_color(source, "#00ff00", True), expected)
+
+    def test_neighbor_hues_find_a_key_shifted_toward_yellow(self):
+        source, rendered = scene()
+        rendered[:, 16:] = (240, 255, 85)
+        result, calibration = run(source, rendered)
+        # Strict dominance is 15 and the background 92.5 at 50%, still below the search start, so 75% is the first weight that finds it.
+        self.assertEqual(calibration.neighbor_weight, 0.75)
+        self.assertEqual(calibration.infotext()["img2img alpha neighbor hues"], "75 auto")
+        self.assertTrue((result[:, :16] == (*SUBJECT, 255)).all())
+        self.assertTrue((result[:, 16:, 3] == 0).all())
+        # Despill stays strict so the hidden color keeps its own hue.
+        self.assertTrue((result[:, 16:, :3] == (240, 240, 85)).all())
+
+        result, calibration = run(source, rendered, neighbor_weight=0.0)
+        self.assertEqual(calibration.infotext()["img2img alpha neighbor hues"], "0")
+        self.assertTrue((result[:, :, 3] == 255).all())
+
+    def test_neighbor_hues_stay_off_when_the_visible_input_shares_them(self):
+        source, rendered = scene()
+        source[:, :16] = (235, 250, 90, 255)
+        rendered[:, :16] = (235, 250, 90)
+        rendered[:, 16:] = (240, 255, 85)
+        result, calibration = run(source, rendered)
+        self.assertEqual(calibration.infotext()["img2img alpha neighbor hues"], "0 auto")
+        self.assertTrue((result[:, :, 3] == 255).all())
 
     def test_mismatched_images_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "matching image sizes"):
