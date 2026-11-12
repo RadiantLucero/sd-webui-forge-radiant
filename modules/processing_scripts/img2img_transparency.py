@@ -46,7 +46,7 @@ def parse_reconstruction_cache(generation_info):
 
 
 def replace_infotext_values(infotext, values):
-    *lines, parameters = infotext.rsplit("\n", 1) if "\n" in infotext else ([], infotext)
+    *lines, parameters = infotext.rsplit("\n", 1)
 
     for key, value in values.items():
         pattern = re.compile(
@@ -278,14 +278,14 @@ class ScriptImg2imgTransparency(scripts.Script):
         self.reconstruct_button.click(
             fn=self.reconstruct_selected,
             _js="(...args) => [...args.slice(0, -1), selected_gallery_index()]",
-            inputs=[generation_info, self.gallery] + self.reconstruction_inputs + [generation_info],
+            inputs=[generation_info, self.gallery] + self.reconstruction_inputs + [self.infotext],
             outputs=[self.gallery, generation_info, self.infotext, self.cache_status],
             show_progress="hidden",
         )
         self.save_original_button.click(
             fn=self.save_original,
             _js="(info, gallery, _) => [info, gallery, selected_gallery_index()]",
-            inputs=[generation_info, self.gallery, generation_info],
+            inputs=[generation_info, self.gallery, self.infotext],
             outputs=[self.cache_status],
             show_progress="hidden",
         )

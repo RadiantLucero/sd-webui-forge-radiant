@@ -110,6 +110,14 @@ the first image. **Use last calculated values** copies those values into the
 sliders as manual values. The values and statistics are also written to the
 infotext and console log.
 
+Select a generated image in the img2img output gallery, adjust the settings, and
+use **Reconstruct with current settings** to rebuild its alpha without another
+model generation. **Save raw image to output** saves the generated RGB image
+before reconstruction to the normal img2img output directory. Both buttons act
+on the selected generated image, not on a grid or mask. The raw images and their
+calibration references are kept in memory for up to two generation batches;
+restarting the application clears that cache.
+
 Reconstruction remains approximate: one RGB image does not uniquely determine
 alpha. Unmixing assumes that translucent content is not tinted toward the key,
 which is exact for white, gray, black, smoke, glass, and veils. Strongly colored
