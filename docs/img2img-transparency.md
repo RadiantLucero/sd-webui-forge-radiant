@@ -114,8 +114,11 @@ Select a generated image in the img2img output gallery, adjust the settings, and
 use **Reconstruct with current settings** to rebuild its alpha without another
 model generation. **Save raw image to output** saves the generated RGB image
 before reconstruction to the normal img2img output directory. Both buttons act
-on the selected generated image, not on a grid or mask. The raw images and their
-calibration references are kept in memory for up to two generation batches;
+on the selected generated image, not on a grid or mask. If no image is selected
+and there is exactly one generated result, both buttons use it automatically,
+even if the gallery also contains a grid or masks. With multiple generated
+results, click the desired image in the img2img gallery first. The raw images and
+their calibration references are kept in memory for up to two generation batches;
 restarting the application clears that cache.
 
 Reconstruction remains approximate: one RGB image does not uniquely determine
