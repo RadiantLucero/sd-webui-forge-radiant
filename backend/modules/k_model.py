@@ -64,8 +64,6 @@ class KModel(torch.nn.Module):
 
         if attention.attention_function is attention.attention_basic:
             _size = 8
-        elif args.dynamic_args.ops.startswith("Mixed"):
-            _size = 1
         else:
             _size = memory_management.dtype_size(self.computation_dtype)
 
