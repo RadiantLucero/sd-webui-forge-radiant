@@ -26,6 +26,7 @@ class Task:
 
     def work(self):
         global last_exception
+        out_of_memory = False
         try:
             self.result = self.func(*self.args, **self.kwargs)
             last_exception = None
@@ -33,14 +34,25 @@ class Task:
             from backend.memory_management import is_oom, logger
 
             if is_oom(e):
-                logger.error("Encountered Out of Memory during Sampling; Unloading all Models...")
+                logger.exception("Encountered Out of Memory during generation; unloading all models before the next task")
                 last_exception = "OOM"
+                out_of_memory = True
             else:
                 if isinstance(e, ModuleNotFoundError) and "recognize" in str(e):
                     logger.error("Failed to recognize diffusion model... (check README for supported models)")
                 else:
                     traceback.print_exc()
                 last_exception = f"{type(e).__name__}: {e}"
+
+        # Release the exception's traceback and tensors before unloading, still on this worker.
+        if out_of_memory:
+            try:
+                from modules.sd_models import unload_model_weights
+
+                unload_model_weights()
+            except Exception as e:
+                traceback.print_exc()
+                last_exception = f"OOM; model cleanup failed: {type(e).__name__}: {e}"
 
 
 def loop():

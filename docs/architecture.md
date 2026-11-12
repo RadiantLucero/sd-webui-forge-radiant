@@ -17,6 +17,8 @@ The main UI is assembled in [`modules/ui.py`](../modules/ui.py). Its Gradio even
 
 Both UI and API paths create a `StableDiffusionProcessing` variant and ultimately use [`modules/processing.py`](../modules/processing.py). For the UI, `txt2img` and `img2img` submit the work through [`modules_forge/main_thread.py`](../modules_forge/main_thread.py), whose worker serializes the primary generation requests. Script hooks can run before the standard `process_images()` path.
 
+For worker tasks that fail with an out-of-memory error, the worker logs the original traceback and unloads models after leaving the exception handler, before publishing completion or starting another task. This recovery is tied to the failing task, not to a later Gradio callback. An unload failure is reported without terminating the worker. This does not serialize independent model operations performed by extensions or other endpoints.
+
 `process_images()` applies request-level option overrides, ensures the required model is loaded, and enters `process_images_inner()`. The inner loop prepares prompts and conditioning, invokes the processing object's sampler, decodes results, runs post-processing hooks, and saves or returns outputs.
 
 ## Model and backend responsibilities
