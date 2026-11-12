@@ -1,4 +1,5 @@
 import ast
+import contextlib
 import datetime
 import functools
 import json
@@ -202,7 +203,7 @@ class TransparencyCallbackTests(unittest.TestCase):
             return str(self.saved_path), None
 
         scope = {
-            "gr": gr, "Image": Image, "json": json, "re": re, "SimpleNamespace": SimpleNamespace, "img2img_alpha": img2img_alpha,
+            "gr": gr, "Image": Image, "json": json, "re": re, "os": os, "contextlib": contextlib, "SimpleNamespace": SimpleNamespace, "img2img_alpha": img2img_alpha,
             "scripts": SimpleNamespace(Script=object),
             "images": SimpleNamespace(save_image=Mock(side_effect=save_image)),
             "shared": SimpleNamespace(opts=SimpleNamespace(outdir_samples="", outdir_img2img_samples=self.directory, samples_format="png")),
@@ -300,7 +301,8 @@ class TransparencyCallbackTests(unittest.TestCase):
         self.gallery = [(self.raw[0], None)]
         for index in (0, -1):
             with self.subTest(index=index):
-                gallery_update, info, _, _ = self.invoke(self.reconstruct, index, self.settings)
+                with self.assertWarnsRegex(UserWarning, "automatic saving of generated images was off"):
+                    gallery_update, info, _, _ = self.invoke(self.reconstruct, index, self.settings)
                 self.assertEqual(gallery_update["selected_index"], 0)
                 self.assertIn("img2img alpha opaque: 40", json.loads(info)["infotexts"][0])
                 self.invoke(self.save, index)
@@ -347,6 +349,33 @@ class TransparencyCallbackTests(unittest.TestCase):
         with Image.open(expected) as saved:
             self.assertEqual(saved.tobytes(), self.raw[1].tobytes())
             self.assertIn("img2img alpha output: raw before reconstruction", saved.info["parameters"])
+
+    def test_reconstruction_overwrites_the_automatically_saved_file(self):
+        image_scope = {"Image": Image, "PngImagePlugin": PngImagePlugin, "os": os, "opts": SimpleNamespace(enable_pnginfo=True, jpeg_quality=80)}
+        load_logic("modules/images.py", image_scope, {"save_image_with_geninfo"})
+        self.scope["images"].save_image_with_geninfo = image_scope["save_image_with_geninfo"]
+        saved = Path(self.directory, "00001-1.png")
+        missing = Path(self.directory, "00002-2.png")
+        Image.new("RGBA", (16, 16), "#ff0000").save(saved)
+        saved.with_suffix(".txt").write_text("old\n")
+        reference = Image.new("RGBA", (16, 16))
+        self.info["extra_generation_params"][self.scope["RECONSTRUCTION_CACHE_KEY"]] = self.scope["RECONSTRUCTION_CACHE"].store({
+            0: img2img_alpha.ReconstructionCacheItem(self.raw[0], reference, (0, 255, 0), saved_path=str(saved)),
+            1: img2img_alpha.ReconstructionCacheItem(self.raw[1], reference, (0, 255, 0), saved_path=str(missing)),
+        })
+
+        _, info, _, _ = self.invoke(self.reconstruct, 1, self.settings)
+        infotext = json.loads(info)["infotexts"][1]
+        with Image.open(saved) as overwritten:
+            self.assertEqual(overwritten.mode, "RGBA")
+            self.assertEqual(overwritten.getpixel((0, 0))[3], 0)
+            self.assertEqual(overwritten.info["parameters"], infotext)
+        self.assertEqual(saved.with_suffix(".txt").read_text(), f"{infotext}\n")
+        self.assertEqual(sorted(path.name for path in Path(self.directory).iterdir() if path.suffix in (".png", ".tmp", ".txt")), ["00001-1.png", "00001-1.txt"])
+
+        with self.assertWarnsRegex(UserWarning, "no longer exists"):
+            self.invoke(self.reconstruct, 4, self.settings)
+        self.assertFalse(missing.exists())
 
     def test_grid_and_mask_are_not_treated_as_generated_images(self):
         for index in (-1, 0, 2):

@@ -135,7 +135,15 @@ sets **Neighbor hues** to a manual 0%, which reproduces its reconstruction.
 
 Select a generated image in the img2img output gallery, adjust the settings, and
 use **Reconstruct with current settings** to rebuild its alpha without another
-model generation. **Save raw image to output** saves the generated RGB image
+model generation. If automatic saving stored the image during generation, the
+new reconstruction overwrites that file, including its infotext and an `.txt`
+infotext file next to it, so it always matches the gallery. There is no undo:
+while the raw image is still cached, reconstruct again with the earlier values
+to restore a previous result. A notification reports the updated file, or why
+nothing was saved: automatic saving was off, or the file was moved or deleted
+(no new file is created then). The grid image is not updated, and extensions
+that change images after compositing are not applied again.
+**Save raw image to output** saves the generated RGB image
 before reconstruction to the normal img2img output directory, using the
 subdirectory and filename settings for generated images plus an `-original`
 suffix. Date-based names use the save date. Both buttons act
