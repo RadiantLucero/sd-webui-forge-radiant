@@ -51,6 +51,7 @@ class ForgeDiffusionEngine:
 
         self.ini_latent: "torch.Tensor" = None  # image from img2img input
         self.ref_latents: list["torch.Tensor"] = []  # images from ImageStitch
+        self.conditioning_cache_key: object | None = None
 
     def _get_predictor(self) -> PredictionDiscreteFlow | PredictionFlux:
         if self.model_config.model_type.name == "FLOW":
@@ -129,6 +130,9 @@ class ForgeDiffusionEngine:
         # called by ImageStitch
         self.ref_latents.clear()
         memory_management.soft_empty_cache()
+
+    def clear_generation_state(self):
+        self.ini_latent = None
 
     def store_reference(self, reference: torch.Tensor):
         if dynamic_args.is_referencing:

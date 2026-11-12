@@ -73,6 +73,13 @@ class Krea2(ForgeDiffusionEngine):
         dynamic_args.krea2_ref_mode = None
         dynamic_args.krea2_ref_kv = None
 
+    def clear_generation_state(self):
+        super().clear_generation_state()
+        if self.conditioning_cache_key is not None:
+            self.clear_edit(release_refs=True)
+            self.clear_moodboard()
+            self.conditioning_cache_key = None
+
     @staticmethod
     def _fit_area(samples: torch.Tensor, max_pixels: int, snap: int = 1) -> torch.Tensor:
         """Downscale (never upscale) a (b, c, h, w) image to fit max_pixels, keeping aspect, dims snapped."""
@@ -119,6 +126,8 @@ class Krea2(ForgeDiffusionEngine):
         area (up or down, as Easy_QwenEdit2509 does), ref_area caps the ref latents' area, instruction replaces the
         prompt text, system_prompt replaces the template's system instruction."""
         self.clear_edit()
+        # Keep the request key after encoding consumes the pending images, until the job ends.
+        self.conditioning_cache_key = object()
         self.edit_ref_mode = ref_mode if ref_mode in ("kv", "t0") else None
         self.edit_labels = bool(picture_labels)
         self.edit_instruction = instruction.strip() if instruction and instruction.strip() else None
@@ -198,6 +207,7 @@ class Krea2(ForgeDiffusionEngine):
         position: image tokens "before" or "after" the prompt. crops: 0 whole, 2 quadrants, 4 fine tiles.
         hide_refs drops the reference rows from the conditioning (needs position "before")."""
         self.clear_moodboard()
+        self.conditioning_cache_key = object()
         self.moodboard_strength = float(strength)
         self.moodboard_position = position
         self.moodboard_extract = "subject" if str(extract).startswith("subject") else "style"

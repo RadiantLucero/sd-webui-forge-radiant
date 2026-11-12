@@ -448,6 +448,7 @@ class StableDiffusionProcessing:
             opts.sdxl_crop_top,
             opts.emphasis,
             hash_tensor(self.init_latent) if isinstance(self, StableDiffusionProcessingImg2Img) else None,
+            self.sd_model.conditioning_cache_key,
         )
 
     def get_conds_with_caching(self, function: prompt_parser.get_learned_conditioning | prompt_parser.get_multicond_learned_conditioning, required_prompts, steps, caches, extra_network_data, hires_steps=None):
@@ -855,10 +856,11 @@ def process_images(p: StableDiffusionProcessing) -> Processed:
             res = process_images_inner(p)
 
     finally:
-        # Edit models keep the img2img input as a pending reference until the next positive prompt encode.
-        # A cond cache hit or a failed run skips that encode, so drop it here instead of leaking it into the next generation.
-        if getattr(shared.sd_model, "ini_latent", None) is not None:
-            shared.sd_model.ini_latent = None
+        # Release pending inputs and transient edit state even when conditioning or sampling fails.
+        if shared.sd_model is not None:
+            if shared.sd_model.conditioning_cache_key is not None:
+                p.clear_prompt_cache()
+            shared.sd_model.clear_generation_state()
 
         # restore original options
         if p.override_settings_restore_afterwards:

@@ -23,6 +23,8 @@ For worker tasks that fail with an out-of-memory error, the worker logs the orig
 
 Conditioning is cached in a single slot shared by txt2img and img2img. Edit-capable engines with reference conditioning enabled (for example Klein or Krea2) keep the encoded img2img input as a pending reference (`ini_latent`) that the next positive prompt encode consumes and publishes as `dynamic_args.ref_latents`. A cache hit skips that encode, so `process_images()` discards a leftover pending reference when the generation ends; otherwise a later txt2img run could adopt the img2img image.
 
+Arming a Krea2 identity-edit or moodboard request also supplies a unique conditioning cache key. The key stays valid after the positive encode consumes the pending images, so batches can reuse conditioning within that request. The generation's `finally` block clears the key, pending images, published edit references and attention state, and shared prompt-cache slots on both success and failure. Clearing those slots also prevents a request interrupted before encoding from leaving an older image-conditioned cache without its references. Plain text conditioning still uses the persistent cache.
+
 ## Model and backend responsibilities
 
 - [`modules/sd_models.py`](../modules/sd_models.py) discovers checkpoints, tracks model state, and coordinates model reloads.
