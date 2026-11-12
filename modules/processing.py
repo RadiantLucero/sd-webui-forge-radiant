@@ -855,6 +855,11 @@ def process_images(p: StableDiffusionProcessing) -> Processed:
             res = process_images_inner(p)
 
     finally:
+        # Edit models keep the img2img input as a pending reference until the next positive prompt encode.
+        # A cond cache hit or a failed run skips that encode, so drop it here instead of leaking it into the next generation.
+        if getattr(shared.sd_model, "ini_latent", None) is not None:
+            shared.sd_model.ini_latent = None
+
         # restore original options
         if p.override_settings_restore_afterwards:
             set_config(stored_opts, save_config=False, disable_log=hasattr(p, "is_xyz_pass"))

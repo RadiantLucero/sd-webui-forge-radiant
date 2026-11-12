@@ -21,6 +21,8 @@ For worker tasks that fail with an out-of-memory error, the worker logs the orig
 
 `process_images()` applies request-level option overrides, ensures the required model is loaded, and enters `process_images_inner()`. The inner loop prepares prompts and conditioning, invokes the processing object's sampler, decodes results, runs post-processing hooks, and saves or returns outputs.
 
+Conditioning is cached in a single slot shared by txt2img and img2img. Edit-capable engines with reference conditioning enabled (for example Klein or Krea2) keep the encoded img2img input as a pending reference (`ini_latent`) that the next positive prompt encode consumes and publishes as `dynamic_args.ref_latents`. A cache hit skips that encode, so `process_images()` discards a leftover pending reference when the generation ends; otherwise a later txt2img run could adopt the img2img image.
+
 ## Model and backend responsibilities
 
 - [`modules/sd_models.py`](../modules/sd_models.py) discovers checkpoints, tracks model state, and coordinates model reloads.
