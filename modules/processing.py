@@ -1095,6 +1095,7 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
                 if alpha_mode == "Native" and image.mode != "RGBA":
                     raise RuntimeError("An img2img postprocessing extension removed the native alpha channel.")
                 if alpha_mode == "Reconstruct":
+                    p.alpha_raw_images.append(image.copy())
                     image, calibration = img2img_alpha.reconstruct(image, p.alpha_references[i], p.alpha_backgrounds[i], p.img2img_alpha_settings)
                     p.extra_generation_params.update(calibration.infotext())
                     logger.info(f"img2img alpha image {i + 1}: opaque {calibration.opaque_threshold:.0f}, transparent {calibration.transparent_threshold:.0f}, color shift {calibration.color_shift:.0f}; {calibration.statistics()}")
@@ -1143,8 +1144,12 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
                         raise RuntimeError("Alpha inpainting requires an overlay mask.")
                     if mask.size != original.size:
                         mask = images.resize_image(p.resize_mode, mask, original.width, original.height)
+                    if alpha_mode == "Reconstruct":
+                        p.alpha_reconstruction_contexts.append((original.copy(), mask.copy(), p.paste_to))
                     image = img2img_alpha.composite(image, original, mask)
                 else:
+                    if alpha_mode == "Reconstruct":
+                        p.alpha_reconstruction_contexts.append(None)
                     image, original_denoised_image = apply_overlay(image, p.paste_to, overlay_image)
 
                 p.pixels_after_sampling.append(image)
@@ -1163,6 +1168,8 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
                 infotexts.append(text)
                 if opts.enable_pnginfo:
                     image.info["parameters"] = text
+                if alpha_mode == "Reconstruct":
+                    p.alpha_gallery_indices.append(len(output_images))
                 output_images.append(image)
 
                 if mask_for_overlay is not None:
@@ -1209,6 +1216,8 @@ def process_images_inner(p: StableDiffusionProcessing) -> Processed:
                 if opts.enable_pnginfo:
                     grid.info["parameters"] = text
                 output_images.insert(0, grid)
+                if getattr(p, "img2img_alpha_mode", "Off") == "Reconstruct":
+                    p.alpha_gallery_indices = [index + 1 for index in p.alpha_gallery_indices]
                 index_of_first_image = 1
             if opts.grid_save:
                 images.save_image(grid, p.outpath_grids, "grid", p.all_seeds[0], p.all_prompts[0], opts.grid_format, info=infotext(use_main_prompt=True), short_filename=not opts.grid_extended_filename, p=p, grid=True)
@@ -1760,6 +1769,9 @@ class StableDiffusionProcessingImg2Img(StableDiffusionProcessing):
         self.alpha_originals = []
         self.alpha_references = []
         self.alpha_backgrounds = []
+        self.alpha_raw_images = []
+        self.alpha_reconstruction_contexts = []
+        self.alpha_gallery_indices = []
         if self.img2img_alpha_mode != "Off":
             if self.resize_mode == 3:
                 raise RuntimeError("img2img transparency does not support latent upscale.")

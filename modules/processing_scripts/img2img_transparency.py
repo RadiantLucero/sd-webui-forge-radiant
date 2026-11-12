@@ -1,10 +1,17 @@
 import json
+import re
 
 import gradio as gr
+from PIL import Image
 
-from modules import img2img_alpha, scripts
-from modules.infotext_utils import PasteField, parse_generation_parameters
+from modules import images, img2img_alpha, scripts, shared
+from modules.infotext_utils import PasteField, parse_generation_parameters, quote
+from modules.ui_common import plaintext_to_html
 from modules.ui_components import FormColorPicker, InputAccordion
+
+RECONSTRUCTION_CACHE_KEY = "img2img alpha reconstruction cache"
+RECONSTRUCTION_CACHE_INDICES_KEY = "img2img alpha reconstruction cache indices"
+RECONSTRUCTION_CACHE = img2img_alpha.ReconstructionCache()
 
 THRESHOLD_KEYS = (
     ("opaque", "img2img alpha opaque", "Partial above"),
@@ -17,6 +24,46 @@ OPTIONAL_KEYS = {"island"}
 ISLAND_RADIUS_KEY = "img2img alpha island radius"
 ISLAND_SHARE_KEY = "img2img alpha island share"
 ISLAND_SMOKE_KEY = "img2img alpha island smoke"
+OPTIONAL_INFOTEXT_KEYS = ("img2img alpha island", ISLAND_RADIUS_KEY, ISLAND_SHARE_KEY, ISLAND_SMOKE_KEY)
+
+
+def parse_reconstruction_cache(generation_info):
+    try:
+        info = json.loads(generation_info or "")
+    except (TypeError, ValueError):
+        return None
+
+    if not isinstance(info, dict):
+        return None
+    params = info.get("extra_generation_params")
+    if not isinstance(params, dict):
+        return None
+    token = params.get(RECONSTRUCTION_CACHE_KEY)
+    indices = params.get(RECONSTRUCTION_CACHE_INDICES_KEY)
+    if not isinstance(token, str) or not isinstance(indices, dict):
+        return None
+    return info, token, indices
+
+
+def replace_infotext_values(infotext, values):
+    *lines, parameters = infotext.rsplit("\n", 1) if "\n" in infotext else ([], infotext)
+
+    for key, value in values.items():
+        pattern = re.compile(
+            rf'(?P<prefix>(?:^|,\s*){re.escape(key)}:\s*)(?:"(?:\\.|[^"\\])*"|[^,]*)'
+        )
+        if value is None:
+            parameters = pattern.sub("", parameters)
+            continue
+        def replacement(match):
+            return match.group("prefix") + quote(str(value))
+
+        if pattern.search(parameters):
+            parameters = pattern.sub(replacement, parameters, count=1)
+        else:
+            parameters += f", {key}: {quote(str(value))}"
+
+    return "\n".join([*lines, parameters])
 
 
 def parse_threshold(text):
@@ -68,6 +115,10 @@ class ScriptImg2imgTransparency(scripts.Script):
 
     def __init__(self):
         self.on_after_component(self.connect_generation_info, elem_id="generation_info_img2img")
+        self.on_after_component(self.connect_gallery, elem_id="img2img_gallery")
+        self.on_after_component(self.connect_infotext, elem_id="html_info_img2img")
+        self.gallery = None
+        self.infotext = None
 
     def title(self):
         return "Transparency"
@@ -87,6 +138,7 @@ class ScriptImg2imgTransparency(scripts.Script):
 
             with gr.Column(visible=True) as reconstruct_controls:
                 gr.Markdown("Thresholds use key dominance: how far the key color's channels exceed the others, from 0 for a neutral color to 255 for the pure key color. For green this is G - max(R, B). Partially transparent pixels are unmixed from the background color measured in the result. Auto values are calculated for every image from the result and the color statistics of the input.")
+                gr.Markdown("The raw generated RGB image is kept in a short-lived cache so you can adjust these settings and reconstruct it again without another generation.")
                 with gr.Row():
                     key_color = FormColorPicker(label="Key color", value=img2img_alpha.DEFAULT_KEY_COLOR, elem_id=self.elem_id("key_color"))
                     auto_key = gr.Checkbox(label="Auto key color", value=False, elem_id=self.elem_id("auto_key"), info="choose the saturated color least present in the visible input")
@@ -118,6 +170,10 @@ class ScriptImg2imgTransparency(scripts.Script):
                 self.calculated_values = gr.Markdown(describe([]), elem_id=self.elem_id("calculated_values"))
                 self.last_values = gr.State(None)
                 use_values = gr.Button("Use last calculated values", elem_id=self.elem_id("use_values"))
+                with gr.Row():
+                    self.reconstruct_button = gr.Button("Reconstruct with current settings", interactive=False, elem_id=self.elem_id("reconstruct_again"))
+                    self.save_original_button = gr.Button("Save raw image to output", interactive=False, elem_id=self.elem_id("save_original"))
+                self.cache_status = gr.Textbox(show_label=False, interactive=False, visible=False, elem_id=self.elem_id("cache_status"))
 
         mode.change(fn=lambda value: gr.update(visible=value == "Reconstruct"), inputs=[mode], outputs=[reconstruct_controls], show_progress="hidden")
         island_check.change(fn=lambda value: gr.update(visible=bool(value)), inputs=[island_check], outputs=[island_controls], show_progress="hidden")
@@ -125,6 +181,13 @@ class ScriptImg2imgTransparency(scripts.Script):
         names = [name for name, _, _ in THRESHOLD_KEYS]
         self.auto_inputs = [autos[name] for name in names]
         self.slider_outputs = [sliders[name] for name in names]
+        self.reconstruction_inputs = [
+            key_color, auto_key,
+            autos["opaque"], sliders["opaque"],
+            autos["transparent"], sliders["transparent"],
+            autos["shift"], sliders["shift"],
+            island_check, autos["island"], sliders["island"], island_radius, island_share, island_smoke,
+        ]
 
         def use_last_values(values):
             values = values or {}
@@ -181,19 +244,160 @@ class ScriptImg2imgTransparency(scripts.Script):
 
         def show_calculated_values(info, *automatic):
             results = last_calculated_values(info)
+            cache_data = parse_reconstruction_cache(info)
+            has_cache = cache_data is not None and bool(cache_data[2])
             if not results:
-                return [describe(results), None] + [gr.skip()] * len(THRESHOLD_KEYS)
+                return (
+                    [describe(results), None]
+                    + [gr.skip()] * len(THRESHOLD_KEYS)
+                    + [
+                        gr.update(interactive=False),
+                        gr.update(interactive=False),
+                        gr.update(value="", visible=False),
+                    ]
+                )
 
             first = {name: value[0] for name, value in results[0][0].items() if value is not None}
             sliders = [gr.update(value=min(max(first[name], slider.minimum), slider.maximum)) if auto and name in first else gr.skip() for (name, _, _), slider, auto in zip(THRESHOLD_KEYS, self.slider_outputs, automatic)]
-            return [describe(results), first] + sliders
+            return [describe(results), first] + sliders + [
+                gr.update(interactive=has_cache),
+                gr.update(interactive=has_cache),
+                gr.update(value="", visible=False),
+            ]
 
         generation_info.change(
             fn=show_calculated_values,
             inputs=[generation_info] + self.auto_inputs,
-            outputs=[self.calculated_values, self.last_values] + self.slider_outputs,
+            outputs=[self.calculated_values, self.last_values] + self.slider_outputs + [
+                self.reconstruct_button,
+                self.save_original_button,
+                self.cache_status,
+            ],
             show_progress="hidden",
         )
+        self.reconstruct_button.click(
+            fn=self.reconstruct_selected,
+            _js="(...args) => [...args.slice(0, -1), selected_gallery_index()]",
+            inputs=[generation_info, self.gallery] + self.reconstruction_inputs + [generation_info],
+            outputs=[self.gallery, generation_info, self.infotext, self.cache_status],
+            show_progress="hidden",
+        )
+        self.save_original_button.click(
+            fn=self.save_original,
+            _js="(info, gallery, _) => [info, gallery, selected_gallery_index()]",
+            inputs=[generation_info, self.gallery, generation_info],
+            outputs=[self.cache_status],
+            show_progress="hidden",
+        )
+
+    def connect_gallery(self, component):
+        self.gallery = component.component
+
+    def connect_infotext(self, component):
+        self.infotext = component.component
+
+    def get_cached_source(self, generation_info, gallery_index):
+        cache_data = parse_reconstruction_cache(generation_info)
+        if cache_data is None:
+            raise gr.Error("The raw generated image is no longer available in the reconstruction cache.")
+        info, token, indices = cache_data
+        if not isinstance(gallery_index, int) or str(gallery_index) not in indices:
+            raise gr.Error("Select a generated image that has a cached raw image.")
+        try:
+            cache_index = int(indices[str(gallery_index)])
+            cached = RECONSTRUCTION_CACHE.get(token, cache_index)
+        except KeyError as error:
+            raise gr.Error(str(error)) from error
+        infotext_index = info.get("index_of_first_image", 0) + cache_index
+        if infotext_index >= len(info.get("infotexts", [])):
+            raise gr.Error("Generation information for the selected image is unavailable.")
+        return info, cached, infotext_index
+
+    def reconstruct_selected(
+        self,
+        generation_info,
+        gallery,
+        key_color,
+        auto_key,
+        opaque_auto,
+        opaque,
+        transparent_auto,
+        transparent,
+        shift_auto,
+        shift,
+        island_check,
+        island_auto,
+        island,
+        island_radius,
+        island_share,
+        island_smoke,
+        gallery_index,
+    ):
+        info, cached, infotext_index = self.get_cached_source(generation_info, gallery_index)
+        settings = img2img_alpha.AlphaSettings(
+            mode="Reconstruct",
+            key_color=key_color or img2img_alpha.DEFAULT_KEY_COLOR,
+            auto_key_color=bool(auto_key),
+            opaque_threshold=None if opaque_auto else float(opaque),
+            transparent_threshold=None if transparent_auto else float(transparent),
+            color_shift=None if shift_auto else float(shift),
+            island_check=bool(island_check),
+            island_threshold=None if island_auto else float(island),
+            island_radius=int(island_radius),
+            island_share=float(island_share) / 100,
+            island_smoke=bool(island_smoke),
+        )
+        settings.validate()
+        background = img2img_alpha.background_color(cached.reference, settings.key_color, settings.auto_key_color)
+        image, calibration = img2img_alpha.reconstruct(cached.image, cached.reference, background, settings)
+
+        if cached.original is not None:
+            if cached.mask is None:
+                raise RuntimeError("The cached inpainting reconstruction is missing its mask.")
+            if cached.paste_to is not None:
+                x, y, width, height = cached.paste_to
+                resized = images.resize_image(1, image, width, height, force_RGBA=True)
+                canvas = Image.new("RGBA", cached.original.size)
+                canvas.paste(resized, (x, y))
+                image = canvas
+            image = img2img_alpha.composite(image, cached.original, cached.mask)
+
+        updated_gallery = list(gallery)
+        _, caption = updated_gallery[gallery_index]
+        updated_gallery[gallery_index] = (image, caption)
+        infotext = info["infotexts"][infotext_index]
+        values = calibration.infotext()
+        for key in OPTIONAL_INFOTEXT_KEYS:
+            values.setdefault(key, None)
+        infotext = replace_infotext_values(infotext, values)
+        info["infotexts"][infotext_index] = infotext
+        info["extra_generation_params"].update(values)
+        return (
+            gr.update(value=updated_gallery, selected_index=gallery_index),
+            json.dumps(info),
+            plaintext_to_html(infotext),
+            gr.skip(),
+        )
+
+    def save_original(self, generation_info, gallery, gallery_index):
+        info, cached, infotext_index = self.get_cached_source(generation_info, gallery_index)
+        infotext = info["infotexts"][infotext_index]
+        params = parse_generation_parameters(infotext)
+        raw_info = replace_infotext_values(infotext, {"img2img alpha output": "raw before reconstruction"})
+        filename, _ = images.save_image(
+            cached.image.copy(),
+            path=shared.opts.outdir_samples or shared.opts.outdir_img2img_samples,
+            basename="",
+            seed=int(params.get("Seed", -1)),
+            prompt=params.get("Prompt", ""),
+            extension=shared.opts.samples_format,
+            info=raw_info,
+            short_filename=True,
+            no_prompt=True,
+            suffix="-original",
+            save_to_dirs=False,
+        )
+        return gr.update(value=f"Saved raw generated image to {filename}", visible=True)
 
     def setup(self, p, enable, mode, key_color, auto_key, opaque_auto, opaque, transparent_auto, transparent, shift_auto, shift, island_check=False, island_auto=True, island=0, island_radius=4, island_share=70, island_smoke=True):
         p.img2img_alpha_settings = img2img_alpha.AlphaSettings(
@@ -209,3 +413,37 @@ class ScriptImg2imgTransparency(scripts.Script):
             island_share=float(island_share) / 100,
             island_smoke=bool(island_smoke),
         )
+
+    def postprocess(self, p, processed, *args):
+        if getattr(p, "img2img_alpha_mode", "Off") != "Reconstruct" or not p.alpha_raw_images:
+            return
+        if not (
+            len(p.alpha_raw_images)
+            == len(p.alpha_reconstruction_contexts)
+            == len(p.alpha_gallery_indices)
+        ):
+            raise RuntimeError("The cached img2img alpha outputs and gallery indices do not match.")
+
+        items = {}
+        reference_count = len(p.alpha_references)
+        if not reference_count or len(p.alpha_backgrounds) != reference_count:
+            raise RuntimeError("The img2img alpha reconstruction references are incomplete.")
+        for raw_index, (image, context, gallery_index) in enumerate(
+            zip(p.alpha_raw_images, p.alpha_reconstruction_contexts, p.alpha_gallery_indices, strict=True)
+        ):
+            reference_index = raw_index % reference_count
+            original, mask, paste_to = context if context is not None else (None, None, None)
+            items[raw_index] = img2img_alpha.ReconstructionCacheItem(
+                image=image,
+                reference=p.alpha_references[reference_index],
+                background=p.alpha_backgrounds[reference_index],
+                original=original,
+                mask=mask,
+                paste_to=paste_to,
+            )
+
+        token = RECONSTRUCTION_CACHE.store(items)
+        processed.extra_generation_params[RECONSTRUCTION_CACHE_KEY] = token
+        processed.extra_generation_params[RECONSTRUCTION_CACHE_INDICES_KEY] = {
+            str(gallery_index): raw_index for raw_index, gallery_index in enumerate(p.alpha_gallery_indices)
+        }

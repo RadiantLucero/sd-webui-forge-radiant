@@ -8,6 +8,8 @@ from PIL import Image
 from modules.img2img_alpha import (
     AlphaSettings,
     ChromaKey,
+    ReconstructionCache,
+    ReconstructionCacheItem,
     background_color,
     composite,
     reconstruct,
@@ -253,6 +255,39 @@ class Img2ImgAlphaTests(unittest.TestCase):
     def test_mismatched_images_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "matching image sizes"):
             reconstruct(Image.new("RGB", (1, 1)), Image.new("RGBA", (2, 1)), (0, 0, 0))
+
+    def test_reconstruction_cache_preserves_raw_output_for_repeated_settings(self):
+        source, rendered = scene()
+        rendered[:, 16] = (65, 195, 50)
+        raw = Image.fromarray(rendered, "RGB")
+        reference = Image.fromarray(source, "RGBA")
+        cache = ReconstructionCache()
+        token = cache.store({0: ReconstructionCacheItem(raw, reference, GREEN)})
+
+        raw.paste((0, 0, 0), (0, 0, 1, 1))
+        cached = cache.get(token, 0)
+        first, _ = reconstruct(cached.image, cached.reference, cached.background)
+        second, _ = reconstruct(
+            cached.image,
+            cached.reference,
+            cached.background,
+            AlphaSettings(mode="Reconstruct", opaque_threshold=100, transparent_threshold=150, color_shift=200),
+        )
+
+        self.assertNotEqual(first.tobytes(), second.tobytes())
+        self.assertEqual(cached.image.getpixel((0, 0)), tuple(rendered[0, 0]))
+
+    def test_reconstruction_cache_evicts_old_generations(self):
+        cache = ReconstructionCache(max_entries=1)
+        image = Image.new("RGB", (1, 1), (10, 20, 30))
+        reference = Image.new("RGBA", (1, 1), (10, 20, 30, 255))
+        item = ReconstructionCacheItem(image, reference, GREEN)
+        old_token = cache.store({0: item})
+        new_token = cache.store({0: item})
+
+        with self.assertRaisesRegex(KeyError, "expired"):
+            cache.get(old_token, 0)
+        self.assertEqual(cache.get(new_token, 0).image.getpixel((0, 0)), (10, 20, 30))
 
     def test_inpainting_fill_keeps_unmasked_alpha(self):
         source = Image.new("RGBA", (2, 2), (200, 30, 40, 80))

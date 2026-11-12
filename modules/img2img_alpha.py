@@ -1,10 +1,84 @@
 """Alpha handling for img2img inputs and outputs."""
 
 import math
+import uuid
+from collections import OrderedDict
 from dataclasses import dataclass, replace
+from threading import RLock
 
 import numpy as np
 from PIL import Image, ImageColor
+
+
+@dataclass(frozen=True)
+class ReconstructionCacheItem:
+    image: Image.Image
+    reference: Image.Image
+    background: tuple[int, int, int]
+    original: Image.Image | None = None
+    mask: Image.Image | None = None
+    paste_to: tuple[int, int, int, int] | None = None
+
+
+class ReconstructionCache:
+    def __init__(self, max_entries=2):
+        if max_entries < 1:
+            raise ValueError("The img2img reconstruction cache must keep at least one generation.")
+        self.max_entries = max_entries
+        self._entries = OrderedDict()
+        self._lock = RLock()
+
+    def store(self, items: dict[int, ReconstructionCacheItem]) -> str:
+        if not items:
+            raise ValueError("Cannot cache an empty img2img reconstruction.")
+
+        references = {}
+        originals = {}
+        masks = {}
+        snapshot = {}
+        for gallery_index, item in items.items():
+            if not isinstance(gallery_index, int) or gallery_index < 0:
+                raise ValueError("Reconstruction cache gallery indices must be non-negative integers.")
+            reference = references.get(id(item.reference))
+            if reference is None:
+                reference = references[id(item.reference)] = item.reference.copy()
+            original = None
+            if item.original is not None:
+                original = originals.get(id(item.original))
+                if original is None:
+                    original = originals[id(item.original)] = item.original.copy()
+            mask = None
+            if item.mask is not None:
+                mask = masks.get(id(item.mask))
+                if mask is None:
+                    mask = masks[id(item.mask)] = item.mask.copy()
+            snapshot[gallery_index] = replace(
+                item,
+                image=item.image.copy(),
+                reference=reference,
+                background=tuple(int(channel) for channel in item.background),
+                original=original,
+                mask=mask,
+            )
+
+        token = uuid.uuid4().hex
+        with self._lock:
+            self._entries[token] = snapshot
+            while len(self._entries) > self.max_entries:
+                self._entries.popitem(last=False)
+        return token
+
+    def get(self, token: str, gallery_index: int) -> ReconstructionCacheItem:
+        with self._lock:
+            try:
+                items = self._entries.pop(token)
+            except KeyError as error:
+                raise KeyError("The img2img reconstruction cache has expired.") from error
+            self._entries[token] = items
+            try:
+                return items[gallery_index]
+            except KeyError as error:
+                raise KeyError("The selected image is not in the img2img reconstruction cache.") from error
 
 
 def validate_native_vae(vae):
