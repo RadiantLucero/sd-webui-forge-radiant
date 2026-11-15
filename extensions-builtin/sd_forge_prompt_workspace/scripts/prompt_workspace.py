@@ -12,6 +12,7 @@ from prompt_workspace_data import (
     validate_section_names,
 )
 from prompt_workspace_generation import install_prompt_resolver
+from storyboard_ui import gallery_callback, storyboard_ui
 
 from modules import script_callbacks, scripts, shared
 from modules.ui_common import refresh_symbol
@@ -684,9 +685,13 @@ def prompt_workspace_ui():
 
 
 def prompt_workspace_tab():
-    return [(prompt_workspace_ui(), "Prompt Workspace", "prompt-workspace")]
+    return [
+        (prompt_workspace_ui(), "Prompt Workspace", "prompt-workspace"),
+        (storyboard_ui(workspace_store(), apply_prompt_js), "Storyboard", "storyboard"),
+    ]
 
 
 script_callbacks.on_ui_settings(on_ui_settings)
 script_callbacks.on_ui_tabs(prompt_workspace_tab)
 script_callbacks.on_after_component(add_quick_browser)
+script_callbacks.on_after_component(gallery_callback(workspace_store))

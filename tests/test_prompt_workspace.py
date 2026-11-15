@@ -533,11 +533,15 @@ class PromptWorkspaceBrowserTests(unittest.TestCase):
         ui_common.refresh_symbol = ""
         ui_components = ModuleType("modules.ui_components")
         ui_components.ToolButton = object
+        storyboard_ui = ModuleType("storyboard_ui")
+        storyboard_ui.gallery_callback = lambda factory: lambda component, **kwargs: None
+        storyboard_ui.storyboard_ui = lambda *args: None
         dependencies = {
             "gradio": gradio,
             "modules": modules,
             "modules.ui_common": ui_common,
             "modules.ui_components": ui_components,
+            "storyboard_ui": storyboard_ui,
         }
         spec = importlib.util.spec_from_file_location("prompt_workspace_browser_test", EXTENSION_DIR / "scripts" / "prompt_workspace.py")
         if spec is None or spec.loader is None:

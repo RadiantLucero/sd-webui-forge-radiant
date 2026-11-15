@@ -71,6 +71,49 @@ If the snippet has a reference name, its reference is inserted instead of
 copying its text. A snippet's negative prompt is appended to the negative
 prompt field.
 
+## Storyboards
+
+The **Storyboard** tab manages projects, ordered scenes, project characters,
+locations and objects. Create a storyboard with a directory for its images,
+then add scenes. The scene editor uses the library's current default section
+names when a scene is created. Its template can include section placeholders
+and free text between them. Changes to a scene's draft are saved as you edit.
+
+Add a project asset with a base description and, for characters, named outfits.
+Descriptions may use library references; the library selector can insert
+snippets into them. Select an asset and outfit and add them to a scene.
+Character and object descriptions are placed in the Subject section, and
+locations in Environment. Character names precede their descriptions and
+outfits, and selected assets are separated with semicolons. If those section
+names are not present, the first and third
+configured sections are used instead (or the last section if there are fewer).
+Snippet negative text is not automatically included when inserting into an
+asset; the interface shows it so it can be added to the scene's negative prompt.
+
+Save a draft as a named variant to preserve its structure, asset definitions,
+library reference texts and resolved positive and negative prompts. Selecting
+another variant replaces the current draft after confirmation. A loaded variant
+keeps its saved definitions while editing; **Use current library and project
+assets** explicitly refreshes them. Applying a selected variant to txt2img or
+img2img replaces the prompt fields after confirmation.
+
+After generating, open **Assign image to storyboard** below the output gallery,
+select the storyboard and scene, and use the selected gallery image. The
+variant must be selected in the Storyboard tab first. Each variant keeps one
+image; assigning another replaces it. Use **Refresh scene** in the Storyboard
+tab to see an image assigned from a generation tab.
+
+**Publish storyboard** requires an image for the selected variant of every
+scene. It creates a new subdirectory in the storyboard's image directory,
+writes `1.png`, `2.png`, etc. in scene order, and removes image metadata from
+the copies. The stored variant images are not changed. If publishing fails
+while writing, the new directory may contain incomplete files.
+
+Storyboard project files are stored separately under `storyboards/` in the
+active Prompt Workspace library directory. Each project records its image
+directory separately. Changing either directory does not move existing data.
+Deleting a storyboard, scene or variant does not delete its image files.
+
 ## Storage location
 
 By default, the library is stored at `data/library.json` inside the extension.
