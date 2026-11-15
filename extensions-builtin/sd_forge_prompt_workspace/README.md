@@ -8,6 +8,48 @@ snippets and named prompt versions in a browsable library.
 - Prompt versions can be saved beside one another and browsed with the variant
   navigation buttons.
 - Categories, tags, and prompt text can be searched and filtered.
+- Line breaks and repeated spaces in saved and applied prompts are reduced to
+  single spaces, because Forge passes them to the text encoder unchanged.
+
+## Prompt templates and sections
+
+Prompt entries have a **Text / template** field and section text fields. Use
+`<<Section name>>` to insert a section wherever it belongs in the template.
+The read-only **Result** shows the resolved prompt, with free text between
+sections preserved. Select sections to insert their placeholders into the
+template; when a section is deselected, its placeholder is removed. New
+prompts use the default section names below:
+
+1. Subject
+2. Action
+3. Environment
+4. Framing
+5. Lighting
+6. Details
+7. Style
+
+Change the defaults in **Default sections** in the tab. Enter one name per
+line; up to 10 names are supported. Each prompt stores its own section list,
+so changing the defaults does not alter existing prompts. **Add default
+sections** adds any current defaults missing from the selected prompt.
+
+## Reusable snippets
+
+Give a snippet an optional unique **Reference name**, such as `character_A`.
+Use it in prompt templates or other snippets as `<character_A>`. References
+can be nested and are resolved case-insensitively. A prompt cannot be saved
+with an unknown reference or a circular reference. Snippets may refer to
+snippets that have not been created yet, allowing nested definitions to be
+built incrementally. A referenced snippet cannot be deleted or renamed until
+its references are removed.
+
+LoRA syntax such as `<lora:style:0.8>` is left unchanged. Snippets can also
+have a default section; **Insert snippet** adds them to the selected section.
+If the snippet has a reference name, its reference is inserted instead of
+copying its text. A snippet's negative prompt is appended to the negative
+prompt field.
+
+## Storage location
 
 By default, the library is stored at `data/library.json` inside the extension.
 This directory is ignored by Git, but deleting the extension can also delete

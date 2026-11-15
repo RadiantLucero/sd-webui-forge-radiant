@@ -165,6 +165,123 @@ class PromptWorkspaceStoreTests(unittest.TestCase):
                 negative_prompt=" ",
             )
 
+    def save_snippet(self, name, prompt, reference="", entry_id=None):
+        return self.store.save_entry(
+            entry_id,
+            kind="snippet",
+            name=name,
+            category="Characters",
+            tags=[],
+            prompt=prompt,
+            negative_prompt="",
+            reference=reference,
+        )
+
+    def test_template_places_sections_and_free_text(self):
+        entry = self.store.save_entry(
+            None,
+            kind="prompt",
+            name="Scene A",
+            category="Scenes",
+            tags=[],
+            prompt="<<Subject>>\n\nBehind him, <<Lighting>> <<Style>>",
+            negative_prompt="",
+            sections=[
+                {"name": "Subject", "text": "A traveler\n  with a gray coat."},
+                {"name": "Lighting", "text": "soft morning light."},
+                {"name": "Style", "text": " "},
+                {"name": "Unused", "text": "not placed"},
+            ],
+        )
+
+        self.assertEqual("A traveler with a gray coat. Behind him, soft morning light.", entry.prompt)
+        self.assertEqual("<<Subject>>\n\nBehind him, <<Lighting>> <<Style>>", entry.template)
+        self.assertEqual([entry], self.store.load())
+
+    def test_rejects_placeholders_for_unknown_sections(self):
+        with self.assertRaisesRegex(ValueError, "Unknown section <<Lightning>>"):
+            self.store.save_entry(
+                None, kind="prompt", name="X", category="C", tags=[], prompt="<<Lightning>>", negative_prompt="", sections=[{"name": "Lighting", "text": "x"}]
+            )
+
+    def test_resolves_nested_references_case_insensitively_and_keeps_lora_syntax(self):
+        self.save_snippet("Character A body", "tall, <character_a_body_global>", "character_A_Body")
+        self.save_snippet("Character A global", "dark hair", "character_a_body_global")
+        self.save_snippet("Character A", "Character A, <character_A_Body>", "character_A")
+
+        entry = self.store.save_entry(
+            None, kind="prompt", name="Scene", category="C", tags=[], prompt="<character_a> walks <lora:style:0.8>", negative_prompt=""
+        )
+
+        self.assertEqual("Character A, tall, dark hair walks <lora:style:0.8>", entry.prompt)
+        self.assertEqual("<character_a> walks <lora:style:0.8>", entry.template)
+
+    def test_rejects_unknown_and_circular_references_without_writing(self):
+        first = self.save_snippet("A", "a", "ref_a")
+        self.save_snippet("B", "<ref_a>", "ref_b")
+        before = self.path.read_text(encoding="utf-8")
+
+        with self.assertRaisesRegex(ValueError, "Unknown reference <missing>"):
+            self.store.save_entry(None, kind="prompt", name="P", category="C", tags=[], prompt="<missing>", negative_prompt="")
+        with self.assertRaisesRegex(ValueError, "Circular reference"):
+            self.save_snippet("A", "<ref_b>", "ref_a", entry_id=first.id)
+        self.assertEqual(before, self.path.read_text(encoding="utf-8"))
+
+    def test_snippets_may_reference_parts_defined_later(self):
+        self.save_snippet("Character A", "Character A, <character_a_body>", "character_a")
+        with self.assertRaisesRegex(ValueError, "Unknown reference <character_a_body>"):
+            self.store.preview("snippet", "<character_a>")
+
+        self.save_snippet("Character A body", "tall", "character_a_body")
+        self.assertEqual("Character A, tall", self.store.preview("snippet", "<character_a>"))
+
+    def test_protects_references_that_are_in_use(self):
+        body = self.save_snippet("Body", "tall", "body")
+        self.save_snippet("Character A", "<body>", "character_a")
+
+        with self.assertRaisesRegex(ValueError, "still used by: Character A"):
+            self.store.delete_entry(body.id)
+        with self.assertRaisesRegex(ValueError, "still used by: Character A"):
+            self.save_snippet("Body", "tall", "renamed", entry_id=body.id)
+        with self.assertRaisesRegex(ValueError, "already used"):
+            self.save_snippet("Other", "x", "BODY")
+
+    def test_free_text_is_normalized_to_single_spaces(self):
+        entry = self.store.save_entry(
+            None,
+            kind="snippet",
+            name="Sad light",
+            category="Lighting",
+            tags=[],
+            prompt="  Muted light,\n\nheavy  shadows. ",
+            negative_prompt="bright\ncolors",
+            section="Lighting",
+        )
+
+        self.assertEqual("Muted light, heavy shadows.", entry.prompt)
+        self.assertEqual("bright colors", entry.negative_prompt)
+
+    def test_default_section_names_are_stored_with_the_library(self):
+        self.assertEqual(["Subject", "Action", "Environment", "Framing", "Lighting", "Details", "Style"], self.store.section_names())
+        self.save_prompt()
+        self.store.save_section_names(["Character", " Mood ", ""])
+
+        self.assertEqual(["Character", "Mood"], self.store.section_names())
+        self.assertEqual(1, len(self.store.load()))
+        with self.assertRaisesRegex(ValueError, "unique"):
+            self.store.save_section_names(["Mood", "mood"])
+        with self.assertRaisesRegex(ValueError, "At most 10"):
+            self.store.save_section_names([f"S{index}" for index in range(11)])
+
+    def test_loads_entries_saved_before_templates_existed(self):
+        self.path.parent.mkdir(parents=True)
+        legacy = {"id": "a", "kind": "prompt", "name": "Old", "category": "C", "tags": [], "prompt": "x", "negative_prompt": "", "variant_group": "g", "variant_name": "Base"}
+        self.path.write_text(json.dumps({"format_version": 1, "entries": [legacy]}), encoding="utf-8")
+
+        entry = self.store.load()[0]
+        self.assertIsNone(entry.template)
+        self.assertEqual("x", entry.source_text())
+
     def test_rejects_unsupported_library_format(self):
         self.path.parent.mkdir(parents=True)
         self.path.write_text(json.dumps({"format_version": 2, "entries": []}), encoding="utf-8")
