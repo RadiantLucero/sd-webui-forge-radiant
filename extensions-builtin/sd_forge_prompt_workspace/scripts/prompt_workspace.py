@@ -266,6 +266,116 @@ def select_variant(store, entry_id, direction):
     return gr.update(value=variants[(current_index + direction) % len(variants)].id)
 
 
+def refresh_quick_entries(store, category, search):
+    categories = category_choices(store)
+    selected_category = category if category in categories else "All categories"
+    return (
+        gr.update(choices=categories, value=selected_category),
+        gr.update(choices=entry_choices(store, selected_category, search), value=None),
+        "",
+        "",
+        "",
+        "",
+    )
+
+
+def select_quick_entry(store, entry_id):
+    if not entry_id:
+        raise ValueError("Select a library entry")
+    kind, prompt, negative = store.resolve_entry(entry_id)
+    preview = prompt
+    if negative:
+        preview += f"\n\nNegative prompt: {negative}"
+    return kind, prompt, negative, preview, gr.update(value=None) if kind == "snippet" else gr.skip()
+
+
+def select_quick_prompt(store, entry_id):
+    if not entry_id:
+        raise ValueError("Select a saved prompt first")
+    kind, prompt, negative = store.resolve_entry(entry_id)
+    if kind != "prompt":
+        raise ValueError("Select a saved prompt first")
+    return kind, prompt, negative
+
+
+def quick_apply_js(tabname, replace):
+    tab_id = json.dumps(tabname)
+    action = "true" if replace else "false"
+    return f"""function(kind, prompt, negativePrompt) {{
+        const replace = {action};
+        if ((kind === "prompt") !== replace) return [];
+        const app = gradioApp();
+        const positive = app.getElementById({tab_id} + "_prompt")?.querySelector("textarea");
+        const negative = app.getElementById({tab_id} + "_neg_prompt")?.querySelector("textarea");
+        if (!positive || !negative) throw new Error("Could not find the prompt fields");
+        if (replace) {{
+            if (!confirm("Replace the current positive and negative prompts?")) return [];
+            positive.value = prompt;
+            negative.value = negativePrompt;
+            updateInput(positive);
+            updateInput(negative);
+        }} else {{
+            if (prompt) {{
+                const start = positive.selectionStart;
+                const end = positive.selectionEnd;
+                const before = positive.value.slice(0, start);
+                const after = positive.value.slice(end);
+                const left = before && !/\\s$/.test(before) ? " " : "";
+                const right = after && !/^\\s/.test(after) ? " " : "";
+                positive.setRangeText(left + prompt + right, start, end, "end");
+                updateInput(positive);
+            }}
+            if (negativePrompt) {{
+                negative.value = negative.value.trimEnd() + (negative.value.trim() ? ", " : "") + negativePrompt;
+                updateInput(negative);
+            }}
+        }}
+        return [];
+    }}"""
+
+
+def quick_browser(store, tabname):
+    with gr.Accordion("Prompt Workspace", open=False, elem_id=f"{tabname}_prompt_workspace_browser"):
+        with gr.Row():
+            category = gr.Dropdown(label="Category", choices=category_choices(store), value="All categories")
+            search = gr.Textbox(label="Search", placeholder="Search library")
+            refresh = gr.Button("Refresh library")
+        entries = gr.Dropdown(label="Library (select a snippet to insert it)", choices=entry_choices(store), value=None)
+        preview = gr.Textbox(label="Selected entry", lines=2, interactive=False)
+        apply_saved = gr.Button("Replace with selected prompt")
+        selected_kind = gr.Textbox(visible=False)
+        selected_prompt = gr.Textbox(visible=False)
+        selected_negative = gr.Textbox(visible=False)
+
+        refresh_inputs = [category, search]
+        refresh_outputs = [category, entries, preview, selected_kind, selected_prompt, selected_negative]
+        for event in (category.input, search.input, refresh.click):
+            event(fn=partial(refresh_quick_entries, store), inputs=refresh_inputs, outputs=refresh_outputs, show_progress=False)
+
+        selected_values = [selected_kind, selected_prompt, selected_negative]
+        entries.input(
+            fn=partial(select_quick_entry, store),
+            inputs=entries,
+            outputs=[*selected_values, preview, entries],
+            show_progress=False,
+        ).success(fn=None, js=quick_apply_js(tabname, False), inputs=selected_values, show_progress=False)
+        apply_saved.click(
+            fn=partial(select_quick_prompt, store),
+            inputs=entries,
+            outputs=selected_values,
+            show_progress=False,
+        ).success(fn=None, js=quick_apply_js(tabname, True), inputs=selected_values, show_progress=False)
+
+
+def add_quick_browser(component, **_kwargs):
+    for tabname in ("txt2img", "img2img"):
+        if component.elem_id == f"{tabname}_neg_prompt_row":
+            extension_dir = Path(__file__).resolve().parent.parent
+            store = PromptWorkspaceStore(library_path(extension_dir, shared.opts.prompt_workspace_directory))
+            quick_browser(store, tabname)
+            break
+
+
 TOGGLE_SECTION_JS = r"""function(selected, template, namesJson) {
     const key = (name) => name.trim().toLowerCase();
     const names = new Set(JSON.parse(namesJson || "[]").map(key));
@@ -480,3 +590,4 @@ def prompt_workspace_tab():
 
 script_callbacks.on_ui_settings(on_ui_settings)
 script_callbacks.on_ui_tabs(prompt_workspace_tab)
+script_callbacks.on_after_component(add_quick_browser)

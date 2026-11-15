@@ -235,6 +235,32 @@ class PromptWorkspaceStoreTests(unittest.TestCase):
         self.save_snippet("Character A body", "tall", "character_a_body")
         self.assertEqual("Character A, tall", self.store.preview("snippet", "<character_a>"))
 
+    def test_quick_selection_resolves_current_references_for_snippets_and_prompts(self):
+        body = self.save_snippet("Body", "tall", "body")
+        character = self.save_snippet("Character", "Character, <body>", "character")
+        scene = self.store.save_entry(
+            None,
+            kind="prompt",
+            name="Scene",
+            category="Scenes",
+            tags=[],
+            prompt="<<Subject>> walks",
+            negative_prompt="blur",
+            sections=[{"name": "Subject", "text": "<character>"}],
+        )
+        self.save_snippet("Body", "short", "body", entry_id=body.id)
+
+        self.assertEqual(("snippet", "Character, short", ""), self.store.resolve_entry(character.id))
+        self.assertEqual(("prompt", "Character, short walks", "blur"), self.store.resolve_entry(scene.id))
+        self.assertEqual("Character, tall walks", self.store.load()[2].prompt)
+
+    def test_quick_selection_rejects_missing_entry_or_unresolved_reference(self):
+        snippet = self.save_snippet("Character", "<not_yet_defined>", "character")
+        with self.assertRaisesRegex(ValueError, "Unknown reference"):
+            self.store.resolve_entry(snippet.id)
+        with self.assertRaisesRegex(ValueError, "no longer exists"):
+            self.store.resolve_entry("missing")
+
     def test_protects_references_that_are_in_use(self):
         body = self.save_snippet("Body", "tall", "body")
         self.save_snippet("Character A", "<body>", "character_a")

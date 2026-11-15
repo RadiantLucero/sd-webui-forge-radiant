@@ -11,6 +11,18 @@ snippets and named prompt versions in a browsable library.
 - Line breaks and repeated spaces in saved and applied prompts are reduced to
   single spaces, because Forge passes them to the text encoder unchanged.
 
+## Using the library while generating
+
+Open **Prompt Workspace** under the prompt fields in txt2img or img2img.
+Filter by category or search, then select a snippet from **Library** to insert
+its resolved text at the positive prompt's cursor position. Any negative text
+from the snippet is appended to the negative prompt. Selecting a saved prompt
+shows its preview; **Replace with selected prompt** replaces both prompt fields
+after confirmation.
+
+References are resolved using the current library when an entry is selected.
+Use **Refresh library** after creating or changing entries in the workspace.
+
 ## Prompt templates and sections
 
 Prompt entries have a **Text / template** field and section text fields. Use

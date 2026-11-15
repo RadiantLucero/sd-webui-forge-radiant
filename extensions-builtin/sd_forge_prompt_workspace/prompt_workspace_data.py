@@ -119,6 +119,18 @@ class PromptWorkspaceStore:
             return compose_prompt(text, sections or [], references)
         return normalize_prompt_text(resolve_references(text, references))
 
+    def resolve_entry(self, entry_id: str) -> tuple[str, str, str]:
+        entries = self.load()
+        entry = next((item for item in entries if item.id == entry_id), None)
+        if entry is None:
+            raise ValueError("The selected prompt entry no longer exists")
+        references = reference_map(entries)
+        if entry.kind == "prompt":
+            prompt = compose_prompt(entry.source_text(), entry.sections or [], references)
+        else:
+            prompt = normalize_prompt_text(resolve_references(entry.prompt, references))
+        return entry.kind, prompt, entry.negative_prompt
+
     def save_entry(
         self,
         entry_id: str | None,
