@@ -1,12 +1,41 @@
+import importlib.util
 import json
 import sys
 import tempfile
 import unittest
+from copy import copy
 from pathlib import Path
+from types import ModuleType, SimpleNamespace
+from unittest.mock import patch
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "extensions-builtin" / "sd_forge_prompt_workspace"))
+EXTENSION_DIR = Path(__file__).resolve().parents[1] / "extensions-builtin" / "sd_forge_prompt_workspace"
+sys.path.insert(0, str(EXTENSION_DIR))
 
 from prompt_workspace_data import PromptWorkspaceStore, library_path
+from prompt_workspace_generation import install_prompt_resolver
+
+
+class FakeProcessing:
+    def __init__(self, prompt, negative_prompt="", hr_prompt=None, hr_negative_prompt=None):
+        self.prompt = prompt
+        self.negative_prompt = negative_prompt
+        self.hr_prompt = hr_prompt
+        self.hr_negative_prompt = hr_negative_prompt
+        self.enable_hr = hr_prompt is not None or hr_negative_prompt is not None
+        self.setup_calls = 0
+
+    def setup_prompts(self):
+        self.setup_calls += 1
+        self.all_prompts = list(self.prompt) if isinstance(self.prompt, list) else [self.prompt]
+        self.all_negative_prompts = (
+            list(self.negative_prompt)
+            if isinstance(self.negative_prompt, list)
+            else [self.negative_prompt] * len(self.all_prompts)
+        )
+        self.all_hr_prompts = [self.hr_prompt] if self.hr_prompt is not None else None
+        self.all_hr_negative_prompts = [self.hr_negative_prompt] if self.hr_negative_prompt is not None else None
+        self.main_prompt = self.all_prompts[0]
+        self.main_negative_prompt = self.all_negative_prompts[0]
 
 
 class PromptWorkspaceStoreTests(unittest.TestCase):
@@ -261,6 +290,101 @@ class PromptWorkspaceStoreTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "no longer exists"):
             self.store.resolve_entry("missing")
 
+    def test_quick_selection_can_insert_reference_or_resolved_text(self):
+        self.save_snippet("Body", "tall", "body")
+        snippet = self.store.save_entry(
+            None,
+            kind="snippet",
+            name="Character",
+            category="Characters",
+            tags=[],
+            prompt="Character, <body>",
+            negative_prompt="avoid <body>",
+            reference="character",
+        )
+        entry, prompt, negative = self.store.select_entry(snippet.id, as_reference=True)
+        self.assertEqual(snippet, entry)
+        self.assertEqual(("<character>", "avoid <body>"), (prompt, negative))
+
+        _, prompt, negative = self.store.select_entry(snippet.id, as_reference=False)
+        self.assertEqual(("Character, tall", "avoid tall"), (prompt, negative))
+
+        unnamed = self.save_snippet("Without reference", "A <body> person")
+        _, prompt, _ = self.store.select_entry(unnamed.id, as_reference=True)
+        self.assertEqual("A tall person", prompt)
+
+    def test_reference_selection_can_include_parts_defined_later(self):
+        snippet = self.save_snippet("Character", "<not_yet_defined>", "character")
+        _, prompt, _ = self.store.select_entry(snippet.id, as_reference=True)
+        self.assertEqual("<character>", prompt)
+
+    def test_generation_resolves_both_prompts_and_hires_without_changing_input(self):
+        self.save_snippet("Body", "tall", "body")
+        self.save_snippet("Character", "a <body> person", "character")
+        processing = FakeProcessing(
+            ["<character> walks <lora:style:0.8>", "A <body> person"],
+            ["avoid <body>", ""],
+            hr_prompt="<character> close-up",
+            hr_negative_prompt="<body>",
+        )
+        install_prompt_resolver(processing, lambda: self.store)
+        processing.setup_prompts()
+
+        self.assertEqual(["a tall person walks <lora:style:0.8>", "A tall person"], processing.all_prompts)
+        self.assertEqual(["avoid tall", ""], processing.all_negative_prompts)
+        self.assertEqual(["a tall person close-up"], processing.all_hr_prompts)
+        self.assertEqual(["tall"], processing.all_hr_negative_prompts)
+        self.assertEqual(processing.all_prompts[0], processing.main_prompt)
+        self.assertEqual(processing.all_negative_prompts[0], processing.main_negative_prompt)
+        self.assertEqual("<character> walks <lora:style:0.8>", processing.prompt[0])
+
+    def test_generation_errors_on_missing_references_without_partial_resolution(self):
+        self.save_snippet("Body", "tall", "body")
+        processing = FakeProcessing("<body>", "<missing>")
+        install_prompt_resolver(processing, lambda: self.store)
+
+        with self.assertRaisesRegex(ValueError, "Unknown reference <missing>"):
+            processing.setup_prompts()
+
+        self.assertEqual(["<body>"], processing.all_prompts)
+        self.assertEqual(["<missing>"], processing.all_negative_prompts)
+
+    def test_generation_resolver_handles_copied_and_reused_processing_objects(self):
+        self.save_snippet("Body", "tall", "body")
+        original = FakeProcessing("<body>")
+        install_prompt_resolver(original, lambda: self.store)
+        copied = copy(original)
+        copied.prompt = "Copied <body>"
+        install_prompt_resolver(copied, lambda: self.store)
+        copied.setup_prompts()
+
+        self.assertEqual(["Copied tall"], copied.all_prompts)
+        self.assertEqual(0, original.setup_calls)
+        install_prompt_resolver(original, lambda: self.store)
+        original.setup_prompts()
+        self.assertEqual(["tall"], original.all_prompts)
+        self.assertEqual(1, original.setup_calls)
+
+    def test_generation_without_references_does_not_read_library(self):
+        processing = FakeProcessing("Plain text <lora:style:0.8>", "")
+
+        def unavailable():
+            raise AssertionError("Library should not be read")
+
+        install_prompt_resolver(processing, unavailable)
+        processing.setup_prompts()
+        self.assertEqual(["Plain text <lora:style:0.8>"], processing.all_prompts)
+
+    def test_generation_ignores_hires_prompts_when_hires_is_disabled(self):
+        self.save_snippet("Body", "tall", "body")
+        processing = FakeProcessing("<body>", hr_prompt="<missing>")
+        processing.enable_hr = False
+        install_prompt_resolver(processing, lambda: self.store)
+        processing.setup_prompts()
+
+        self.assertEqual(["tall"], processing.all_prompts)
+        self.assertEqual(["<missing>"], processing.all_hr_prompts)
+
     def test_protects_references_that_are_in_use(self):
         body = self.save_snippet("Body", "tall", "body")
         self.save_snippet("Character A", "<body>", "character_a")
@@ -271,6 +395,81 @@ class PromptWorkspaceStoreTests(unittest.TestCase):
             self.save_snippet("Body", "tall", "renamed", entry_id=body.id)
         with self.assertRaisesRegex(ValueError, "already used"):
             self.save_snippet("Other", "x", "BODY")
+
+    def test_protects_references_used_in_negative_prompts(self):
+        body = self.save_snippet("Body", "tall", "body")
+        self.store.save_entry(
+            None,
+            kind="snippet",
+            name="Character",
+            category="Characters",
+            tags=[],
+            prompt="a person",
+            negative_prompt="avoid <body>",
+        )
+
+        with self.assertRaisesRegex(ValueError, "still used by: Character"):
+            self.store.delete_entry(body.id)
+        with self.assertRaisesRegex(ValueError, "still used by: Character"):
+            self.save_snippet("Body", "tall", "renamed", entry_id=body.id)
+
+    def test_renaming_reference_requires_updating_its_own_negative_prompt(self):
+        body = self.store.save_entry(
+            None,
+            kind="snippet",
+            name="Body",
+            category="Characters",
+            tags=[],
+            prompt="tall",
+            negative_prompt="<body>",
+            reference="body",
+        )
+
+        with self.assertRaisesRegex(ValueError, "still used by: Body"):
+            self.store.save_entry(
+                body.id,
+                kind="snippet",
+                name="Body",
+                category="Characters",
+                tags=[],
+                prompt="tall",
+                negative_prompt="<body>",
+                reference="renamed",
+            )
+        updated = self.store.save_entry(
+            body.id,
+            kind="snippet",
+            name="Body",
+            category="Characters",
+            tags=[],
+            prompt="tall",
+            negative_prompt="<renamed>",
+            reference="renamed",
+        )
+        self.assertTrue(self.store.delete_entry(updated.id))
+
+    def test_saved_prompt_rejects_unknown_negative_references(self):
+        with self.assertRaisesRegex(ValueError, "Unknown reference <missing>"):
+            self.store.save_entry(
+                None,
+                kind="prompt",
+                name="Scene",
+                category="Scenes",
+                tags=[],
+                prompt="a person",
+                negative_prompt="<missing>",
+            )
+
+        snippet = self.store.save_entry(
+            None,
+            kind="snippet",
+            name="Character",
+            category="Characters",
+            tags=[],
+            prompt="a person",
+            negative_prompt="<missing>",
+        )
+        self.assertEqual("<missing>", snippet.negative_prompt)
 
     def test_free_text_is_normalized_to_single_spaces(self):
         entry = self.store.save_entry(
@@ -314,6 +513,102 @@ class PromptWorkspaceStoreTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "Unsupported prompt library format"):
             self.store.load()
+
+
+class PromptWorkspaceBrowserTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        gradio = ModuleType("gradio")
+        gradio.update = lambda **kwargs: kwargs
+        modules = ModuleType("modules")
+        modules.__path__ = []
+        modules.scripts = SimpleNamespace(Script=object, AlwaysVisible=object())
+        modules.shared = SimpleNamespace()
+        modules.script_callbacks = SimpleNamespace(
+            on_ui_settings=lambda callback: None,
+            on_ui_tabs=lambda callback: None,
+            on_after_component=lambda callback: None,
+        )
+        ui_common = ModuleType("modules.ui_common")
+        ui_common.refresh_symbol = ""
+        ui_components = ModuleType("modules.ui_components")
+        ui_components.ToolButton = object
+        dependencies = {
+            "gradio": gradio,
+            "modules": modules,
+            "modules.ui_common": ui_common,
+            "modules.ui_components": ui_components,
+        }
+        spec = importlib.util.spec_from_file_location("prompt_workspace_browser_test", EXTENSION_DIR / "scripts" / "prompt_workspace.py")
+        if spec is None or spec.loader is None:
+            raise RuntimeError("Cannot load Prompt Workspace script")
+        cls.browser = importlib.util.module_from_spec(spec)
+        with patch.dict(sys.modules, dependencies):
+            spec.loader.exec_module(cls.browser)
+
+    def setUp(self):
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        self.store = PromptWorkspaceStore(Path(temp_dir.name) / "library.json")
+
+    def test_generation_can_use_default_library_before_settings_are_registered(self):
+        with patch.object(self.browser.shared, "opts", SimpleNamespace(), create=True):
+            self.assertEqual(EXTENSION_DIR / "data" / "library.json", self.browser.workspace_store().path)
+
+    def test_grid_filters_and_clamps_pages(self):
+        for index in range(23):
+            self.store.save_entry(
+                None,
+                kind="snippet",
+                name=f"Entry {index:02}",
+                category="Weather" if index < 21 else "Characters",
+                tags=["moon"] if index == 20 else [],
+                prompt="clouds",
+                negative_prompt="avoid fog" if index == 20 else "",
+            )
+
+        first = self.browser.refresh_quick_entries(self.store, "All categories", "", 0)
+        second = self.browser.refresh_quick_entries(self.store, "All categories", "", 1)
+        self.assertEqual((0, 20, {"interactive": False}, {"interactive": True}),
+                         (first[1], len(json.loads(first[2])), first[4], first[5]))
+        self.assertEqual((1, 3, {"interactive": True}, {"interactive": False}),
+                         (second[1], len(json.loads(second[2])), second[4], second[5]))
+        self.assertTrue(set(json.loads(first[2])).isdisjoint(json.loads(second[2])))
+
+        filtered = self.browser.refresh_quick_entries(self.store, "Weather", "MOON", 99)
+        self.assertEqual((0, 1, "Page 1 / 1 · 1 entries"),
+                         (filtered[1], len(json.loads(filtered[2])), filtered[3]))
+        self.assertEqual({"visible": False}, filtered[7])
+        self.assertEqual(1, self.browser.quick_page(self.store, "Weather", "FOG", 0)[-1])
+
+        categories, selected, choices, page, last_page, total = self.browser.quick_page(
+            self.store, "Removed category", "", -1
+        )
+        self.assertIn("Weather", categories)
+        self.assertEqual(("All categories", 0, 1, 23), (selected, page, last_page, total))
+        self.assertEqual(20, len(choices))
+
+    def test_selecting_grid_entries_and_installing_generation_resolver(self):
+        snippet = self.store.save_entry(
+            None,
+            kind="snippet",
+            name="Clouds",
+            category="Weather",
+            tags=[],
+            reference="clouds",
+            prompt="dark clouds",
+            negative_prompt="",
+        )
+        selected = self.browser.select_quick_entry(self.store, 0, json.dumps([snippet.id]), True)
+        self.assertEqual(("snippet", "<clouds>", "", "dark clouds", snippet.id, {"interactive": False}), selected)
+        with self.assertRaisesRegex(ValueError, "page has changed"):
+            self.browser.select_quick_entry(self.store, 1, json.dumps([snippet.id]), True)
+
+        processing = FakeProcessing("<clouds>", "<missing>")
+        with patch.object(self.browser, "workspace_store", return_value=self.store):
+            self.browser.PromptWorkspaceGeneration().before_process(processing)
+            with self.assertRaisesRegex(ValueError, "Unknown reference <missing>"):
+                processing.setup_prompts()
 
 
 if __name__ == "__main__":

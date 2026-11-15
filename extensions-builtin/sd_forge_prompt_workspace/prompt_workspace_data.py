@@ -45,7 +45,7 @@ class PromptEntry:
         return self.prompt if self.template is None else self.template
 
     def mentioned_text(self) -> str:
-        return " ".join([self.source_text(), *(section["text"] for section in self.sections or [])])
+        return " ".join([self.source_text(), *(section["text"] for section in self.sections or []), self.negative_prompt])
 
 
 def reference_map(entries: list[PromptEntry]) -> dict[str, str]:
@@ -119,17 +119,25 @@ class PromptWorkspaceStore:
             return compose_prompt(text, sections or [], references)
         return normalize_prompt_text(resolve_references(text, references))
 
-    def resolve_entry(self, entry_id: str) -> tuple[str, str, str]:
+    def select_entry(self, entry_id: str, *, as_reference: bool = False) -> tuple[PromptEntry, str, str]:
         entries = self.load()
         entry = next((item for item in entries if item.id == entry_id), None)
         if entry is None:
             raise ValueError("The selected prompt entry no longer exists")
+        if as_reference and entry.kind == "snippet" and entry.reference:
+            prompt = f"<{entry.reference}>" if entry.prompt else ""
+            return entry, prompt, entry.negative_prompt
         references = reference_map(entries)
         if entry.kind == "prompt":
             prompt = compose_prompt(entry.source_text(), entry.sections or [], references)
         else:
             prompt = normalize_prompt_text(resolve_references(entry.prompt, references))
-        return entry.kind, prompt, entry.negative_prompt
+        negative = normalize_prompt_text(resolve_references(entry.negative_prompt, references))
+        return entry, prompt, negative
+
+    def resolve_entry(self, entry_id: str) -> tuple[str, str, str]:
+        entry, prompt, negative = self.select_entry(entry_id)
+        return entry.kind, prompt, negative
 
     def save_entry(
         self,
@@ -169,6 +177,8 @@ class PromptWorkspaceStore:
         )
         if existing and existing.reference and existing.reference.casefold() != entry.reference.casefold():
             self._ensure_reference_unused(entries, existing)
+            if any(match.group(1).casefold() == existing.reference.casefold() for match in REFERENCE_PATTERN.finditer(entry.mentioned_text())):
+                raise ValueError(f"<{existing.reference}> is still used by: {entry.name}")
         return self._store(entries, section_names, entry, replace_id=existing.id if existing else None)
 
     def save_variant(
@@ -235,6 +245,7 @@ class PromptWorkspaceStore:
                 raise ValueError("Section placeholders can only be used in prompts")
             # Snippets may reference parts that are defined later; cycles are still rejected.
             composed = normalize_prompt_text(resolve_references(entry.prompt, references, allow_unknown=True))
+        resolve_references(entry.negative_prompt, references, allow_unknown=entry.kind == "snippet")
         if not composed and not entry.negative_prompt:
             raise ValueError("Enter a prompt or a negative prompt before saving")
         if entry.kind == "prompt":

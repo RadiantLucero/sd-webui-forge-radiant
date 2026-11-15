@@ -14,14 +14,16 @@ snippets and named prompt versions in a browsable library.
 ## Using the library while generating
 
 Open **Prompt Workspace** under the prompt fields in txt2img or img2img.
-Filter by category or search, then select a snippet from **Library** to insert
-its resolved text at the positive prompt's cursor position. Any negative text
-from the snippet is appended to the negative prompt. Selecting a saved prompt
-shows its preview; **Replace with selected prompt** replaces both prompt fields
-after confirmation.
+Filter by category or search, then click a snippet to insert it at the
+positive prompt's cursor position. Use **Previous** and **Next** to browse
+more results. With **Insert snippets as references** checked, snippets with a
+reference name insert `<name>`; otherwise their resolved text is inserted.
+Snippets without a reference name always insert their text. Any negative text
+from the snippet is appended to the negative prompt.
 
-References are resolved using the current library when an entry is selected.
-Use **Refresh library** after creating or changing entries in the workspace.
+Selecting a saved prompt shows its preview; **Replace with selected prompt**
+replaces both prompt fields after confirmation. Use the refresh icon after
+creating or changing entries in the workspace.
 
 ## Prompt templates and sections
 
@@ -54,6 +56,14 @@ with an unknown reference or a circular reference. Snippets may refer to
 snippets that have not been created yet, allowing nested definitions to be
 built incrementally. A referenced snippet cannot be deleted or renamed until
 its references are removed.
+
+References can also be typed directly into the positive or negative
+txt2img/img2img prompts. During generation, the extension resolves them using
+the current library, including nested references. The input fields remain
+unchanged; the generated image's prompt records the resolved text. Unknown or
+circular references abort generation with an error. Resolution runs before
+generation scripts such as Dynamic Prompts, so references introduced later by
+a wildcard or another script are not expanded.
 
 LoRA syntax such as `<lora:style:0.8>` is left unchanged. Snippets can also
 have a default section; **Insert snippet** adds them to the selected section.

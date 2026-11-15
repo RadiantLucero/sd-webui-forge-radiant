@@ -11,8 +11,37 @@ from prompt_workspace_data import (
     used_section_names,
     validate_section_names,
 )
+from prompt_workspace_generation import install_prompt_resolver
 
-from modules import script_callbacks, shared
+from modules import script_callbacks, scripts, shared
+from modules.ui_common import refresh_symbol
+from modules.ui_components import ToolButton
+
+QUICK_GRID_COLUMNS = 4
+QUICK_GRID_ROWS = 5
+QUICK_PAGE_SIZE = QUICK_GRID_COLUMNS * QUICK_GRID_ROWS
+
+
+def workspace_store():
+    extension_dir = Path(__file__).resolve().parent.parent
+    directory = getattr(shared.opts, "prompt_workspace_directory", "")
+    return PromptWorkspaceStore(library_path(extension_dir, directory))
+
+
+class PromptWorkspaceGeneration(scripts.Script):
+    create_group = False
+
+    def title(self):
+        return "Prompt Workspace"
+
+    def show(self, is_img2img):
+        return scripts.AlwaysVisible
+
+    def ui(self, is_img2img):
+        return []
+
+    def before_process(self, p):
+        install_prompt_resolver(p, workspace_store)
 
 
 def on_ui_settings():
@@ -48,7 +77,6 @@ def entry_choices(store, category="All categories", search=""):
             or query in entry.category.casefold()
             or query in entry.reference.casefold()
             or query in entry.mentioned_text().casefold()
-            or query in entry.negative_prompt.casefold()
             or any(query in tag.casefold() for tag in entry.tags)
         )
     ]
@@ -266,27 +294,48 @@ def select_variant(store, entry_id, direction):
     return gr.update(value=variants[(current_index + direction) % len(variants)].id)
 
 
-def refresh_quick_entries(store, category, search):
+def quick_page(store, category, search, page):
     categories = category_choices(store)
     selected_category = category if category in categories else "All categories"
+    choices = entry_choices(store, selected_category, search)
+    last_page = max(0, (len(choices) - 1) // QUICK_PAGE_SIZE)
+    page = max(0, min(int(page or 0), last_page))
+    start = page * QUICK_PAGE_SIZE
+    return categories, selected_category, choices[start : start + QUICK_PAGE_SIZE], page, last_page, len(choices)
+
+
+def refresh_quick_entries(store, category, search, page):
+    categories, selected_category, choices, page, last_page, total = quick_page(store, category, search, page)
     return (
         gr.update(choices=categories, value=selected_category),
-        gr.update(choices=entry_choices(store, selected_category, search), value=None),
+        page,
+        json.dumps([entry_id for _, entry_id in choices]),
+        f"Page {page + 1} / {last_page + 1} · {total} entries",
+        gr.update(interactive=page > 0),
+        gr.update(interactive=page < last_page),
+        *(gr.update(visible=row * QUICK_GRID_COLUMNS < len(choices)) for row in range(QUICK_GRID_ROWS)),
+        *(
+            gr.update(value=choices[index][0], visible=True)
+            if index < len(choices)
+            else gr.update(value="", visible=False)
+            for index in range(QUICK_PAGE_SIZE)
+        ),
         "",
         "",
-        "",
-        "",
+        gr.update(interactive=False),
+        *("" for _ in range(3)),
     )
 
 
-def select_quick_entry(store, entry_id):
-    if not entry_id:
-        raise ValueError("Select a library entry")
-    kind, prompt, negative = store.resolve_entry(entry_id)
-    preview = prompt
+def select_quick_entry(store, index, entries_json, as_reference):
+    entry_ids = json.loads(entries_json)
+    if index >= len(entry_ids):
+        raise ValueError("The library page has changed; refresh it and select the entry again")
+    entry, prompt, negative = store.select_entry(entry_ids[index], as_reference=as_reference)
+    preview = entry.prompt if entry.kind == "snippet" and as_reference and entry.reference else prompt
     if negative:
         preview += f"\n\nNegative prompt: {negative}"
-    return kind, prompt, negative, preview, gr.update(value=None) if kind == "snippet" else gr.skip()
+    return entry.kind, prompt, negative, preview, entry.id, gr.update(interactive=entry.kind == "prompt")
 
 
 def select_quick_prompt(store, entry_id):
@@ -335,33 +384,86 @@ def quick_apply_js(tabname, replace):
 
 
 def quick_browser(store, tabname):
+    categories, category_value, choices, page, last_page, total = quick_page(store, "All categories", "", 0)
     with gr.Accordion("Prompt Workspace", open=False, elem_id=f"{tabname}_prompt_workspace_browser"):
         with gr.Row():
-            category = gr.Dropdown(label="Category", choices=category_choices(store), value="All categories")
+            category = gr.Dropdown(label="Category", choices=categories, value=category_value)
             search = gr.Textbox(label="Search", placeholder="Search library")
-            refresh = gr.Button("Refresh library")
-        entries = gr.Dropdown(label="Library (select a snippet to insert it)", choices=entry_choices(store), value=None)
+            refresh = ToolButton(value=refresh_symbol, tooltip="Refresh library")
+        as_reference = gr.Checkbox(
+            label="Insert snippets as references",
+            value=True,
+            info="Snippets without a reference name are inserted as text.",
+        )
+        grid_rows = []
+        grid_buttons = []
+        for row in range(QUICK_GRID_ROWS):
+            with gr.Row(visible=row * QUICK_GRID_COLUMNS < len(choices)) as grid_row:
+                grid_rows.append(grid_row)
+                for column in range(QUICK_GRID_COLUMNS):
+                    index = row * QUICK_GRID_COLUMNS + column
+                    grid_buttons.append(
+                        gr.Button(
+                            value=choices[index][0] if index < len(choices) else "",
+                            visible=index < len(choices),
+                            size="sm",
+                            min_width=100,
+                        )
+                    )
+        with gr.Row():
+            previous_page = gr.Button("Previous", size="sm", interactive=False)
+            page_status = gr.Markdown(f"Page {page + 1} / {last_page + 1} · {total} entries")
+            next_page = gr.Button("Next", size="sm", interactive=page < last_page)
         preview = gr.Textbox(label="Selected entry", lines=2, interactive=False)
-        apply_saved = gr.Button("Replace with selected prompt")
+        apply_saved = gr.Button("Replace with selected prompt", interactive=False)
+        page_index = gr.Number(value=0, precision=0, visible=False)
+        grid_ids = gr.Textbox(value=json.dumps([entry_id for _, entry_id in choices]), visible=False)
+        selected_id = gr.Textbox(visible=False)
         selected_kind = gr.Textbox(visible=False)
         selected_prompt = gr.Textbox(visible=False)
         selected_negative = gr.Textbox(visible=False)
 
-        refresh_inputs = [category, search]
-        refresh_outputs = [category, entries, preview, selected_kind, selected_prompt, selected_negative]
-        for event in (category.input, search.input, refresh.click):
-            event(fn=partial(refresh_quick_entries, store), inputs=refresh_inputs, outputs=refresh_outputs, show_progress=False)
-
         selected_values = [selected_kind, selected_prompt, selected_negative]
-        entries.input(
-            fn=partial(select_quick_entry, store),
-            inputs=entries,
-            outputs=[*selected_values, preview, entries],
-            show_progress=False,
-        ).success(fn=None, js=quick_apply_js(tabname, False), inputs=selected_values, show_progress=False)
+        refresh_inputs = [category, search]
+        refresh_outputs = [
+            category,
+            page_index,
+            grid_ids,
+            page_status,
+            previous_page,
+            next_page,
+            *grid_rows,
+            *grid_buttons,
+            preview,
+            selected_id,
+            apply_saved,
+            *selected_values,
+        ]
+        for event in (category.input, search.input, refresh.click):
+            event(
+                fn=lambda category, search: refresh_quick_entries(store, category, search, 0),
+                inputs=refresh_inputs,
+                outputs=refresh_outputs,
+                show_progress=False,
+            )
+        for button, direction in ((previous_page, -1), (next_page, 1)):
+            button.click(
+                fn=lambda category, search, page, direction=direction: refresh_quick_entries(store, category, search, page + direction),
+                inputs=[*refresh_inputs, page_index],
+                outputs=refresh_outputs,
+                show_progress=False,
+            )
+
+        for index, button in enumerate(grid_buttons):
+            button.click(
+                fn=partial(select_quick_entry, store, index),
+                inputs=[grid_ids, as_reference],
+                outputs=[*selected_values, preview, selected_id, apply_saved],
+                show_progress=False,
+            ).success(fn=None, js=quick_apply_js(tabname, False), inputs=selected_values, show_progress=False)
         apply_saved.click(
             fn=partial(select_quick_prompt, store),
-            inputs=entries,
+            inputs=selected_id,
             outputs=selected_values,
             show_progress=False,
         ).success(fn=None, js=quick_apply_js(tabname, True), inputs=selected_values, show_progress=False)
@@ -370,9 +472,7 @@ def quick_browser(store, tabname):
 def add_quick_browser(component, **_kwargs):
     for tabname in ("txt2img", "img2img"):
         if component.elem_id == f"{tabname}_neg_prompt_row":
-            extension_dir = Path(__file__).resolve().parent.parent
-            store = PromptWorkspaceStore(library_path(extension_dir, shared.opts.prompt_workspace_directory))
-            quick_browser(store, tabname)
+            quick_browser(workspace_store(), tabname)
             break
 
 
@@ -424,8 +524,7 @@ def apply_prompt_js(tabname):
 
 
 def prompt_workspace_ui():
-    extension_dir = Path(__file__).resolve().parent.parent
-    store = PromptWorkspaceStore(library_path(extension_dir, shared.opts.prompt_workspace_directory))
+    store = workspace_store()
 
     with gr.Blocks() as ui:
         gr.Markdown("Browse reusable text snippets and save named prompt versions. Use `<reference>` to insert a snippet and `<<Section>>` to place a section in a prompt.")
