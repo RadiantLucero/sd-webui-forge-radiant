@@ -2,6 +2,7 @@ import json
 from functools import partial
 
 import gradio as gr
+from gradio.context import get_blocks_context
 from prompt_workspace_data import MAX_SECTIONS
 from storyboard_data import StoryboardStore
 
@@ -436,6 +437,8 @@ def gallery_callback(library_factory):
     panels = {}
 
     def after_component(component, **_kwargs):
+        if _kwargs.get("render", True) is False or get_blocks_context() is None:
+            return
         for tab in ("txt2img", "img2img"):
             if component.elem_id == f"{tab}_gallery":
                 library = library_factory()

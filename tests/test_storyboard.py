@@ -3,7 +3,8 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import MagicMock, Mock, patch
 
 from PIL import Image
 
@@ -16,10 +17,64 @@ from storyboard_ui import (
     delete_project,
     delete_scene,
     delete_variant,
+    gallery_callback,
     load_variant,
     step_variant,
     take_image,
 )
+
+
+class StoryboardGalleryCallbackTests(unittest.TestCase):
+    def test_gallery_hook_does_not_create_panels_for_runtime_copies(self):
+        for context, render in ((None, True), (object(), False)):
+            for tab in ("txt2img", "img2img"):
+                with (
+                    self.subTest(context=context, render=render, tab=tab),
+                    patch("storyboard_ui.get_blocks_context", return_value=context),
+                    patch("storyboard_ui.gr") as ui,
+                ):
+                    factory = Mock(return_value=SimpleNamespace(path=Path("library.json")))
+                    callback = gallery_callback(factory)
+                    callback(SimpleNamespace(elem_id=f"{tab}_gallery"), render=render)
+                    factory.assert_not_called()
+                    self.assertEqual([], ui.mock_calls)
+
+    def test_gallery_hook_binds_original_components_and_ignores_runtime_info_updates(self):
+        for tab in ("txt2img", "img2img"):
+            with (
+                self.subTest(tab=tab),
+                patch("storyboard_ui.get_blocks_context", return_value=object()) as context,
+                patch("storyboard_ui.gr", MagicMock()) as ui,
+                patch("storyboard_ui.StoryboardStore"),
+                patch("storyboard_ui.project_choices", return_value=[]),
+            ):
+                project, scene, variant = Mock(), Mock(), Mock()
+                refresh, take = Mock(), Mock()
+                ui.Dropdown.side_effect = [project, scene, variant]
+                ui.Button.side_effect = [refresh, take]
+                factory = Mock(return_value=SimpleNamespace(path=Path("library.json")))
+                callback = gallery_callback(factory)
+                gallery = SimpleNamespace(elem_id=f"{tab}_gallery")
+                info = SimpleNamespace(elem_id=f"generation_info_{tab}")
+                callback(gallery)
+                callback(info)
+                factory.assert_called_once_with()
+                project.input.assert_called_once()
+                scene.input.assert_called_once()
+                take.click.assert_called_once()
+                inputs = take.click.call_args.kwargs["inputs"]
+                self.assertIs(gallery, inputs[3])
+                self.assertIs(info, inputs[4])
+
+                ui.reset_mock()
+                factory.reset_mock()
+                take.click.reset_mock()
+                callback(SimpleNamespace(elem_id=info.elem_id), render=False)
+                context.return_value = None
+                callback(SimpleNamespace(elem_id=info.elem_id))
+                factory.assert_not_called()
+                self.assertEqual([], ui.mock_calls)
+                take.click.assert_not_called()
 
 
 class StoryboardTests(unittest.TestCase):

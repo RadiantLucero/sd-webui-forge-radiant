@@ -129,7 +129,8 @@ After generating, open **Assign image to storyboard** below the output gallery,
 select the storyboard and scene, and use the selected gallery image. The
 variant must be selected in the Storyboard tab first. Each variant keeps one
 image; assigning another replaces it. Use **Refresh scene** in the Storyboard
-tab to see an image assigned from a generation tab.
+tab to see an image assigned from a generation tab. Gallery updates, including
+img2img batch results, reuse the existing assignment panel.
 
 **Publish storyboard** requires an image for the selected variant of every
 scene. It creates a new subdirectory in the storyboard's image directory,

@@ -672,6 +672,8 @@ class PromptWorkspaceBrowserTests(unittest.TestCase):
         gradio = ModuleType("gradio")
         gradio.update = lambda **kwargs: kwargs
         gradio.skip = lambda: {"__type__": "update"}
+        gradio_context = ModuleType("gradio.context")
+        gradio_context.get_blocks_context = lambda: None
         modules = ModuleType("modules")
         modules.__path__ = []
         modules.scripts = SimpleNamespace(Script=object, AlwaysVisible=object())
@@ -690,6 +692,7 @@ class PromptWorkspaceBrowserTests(unittest.TestCase):
         storyboard_ui.storyboard_ui = lambda *args: None
         dependencies = {
             "gradio": gradio,
+            "gradio.context": gradio_context,
             "modules": modules,
             "modules.ui_common": ui_common,
             "modules.ui_components": ui_components,
@@ -710,6 +713,23 @@ class PromptWorkspaceBrowserTests(unittest.TestCase):
     def test_generation_can_use_default_library_before_settings_are_registered(self):
         with patch.object(self.browser.shared, "opts", SimpleNamespace(), create=True):
             self.assertEqual(EXTENSION_DIR / "data" / "library.json", self.browser.workspace_store().path)
+
+    def test_quick_browser_hook_ignores_runtime_copies_but_handles_ui_construction(self):
+        for context, render, builds_ui in ((None, True, False), (object(), False, False), (object(), True, True)):
+            for tab in ("txt2img", "img2img"):
+                with (
+                    self.subTest(context=context, render=render, tab=tab),
+                    patch.object(self.browser, "get_blocks_context", return_value=context),
+                    patch.object(self.browser, "workspace_store", return_value=self.store) as factory,
+                    patch.object(self.browser, "quick_browser") as build,
+                ):
+                    self.browser.add_quick_browser(SimpleNamespace(elem_id=f"{tab}_neg_prompt_row"), render=render)
+                    if builds_ui:
+                        factory.assert_called_once_with()
+                        build.assert_called_once_with(self.store, tab)
+                    else:
+                        factory.assert_not_called()
+                        build.assert_not_called()
 
     def test_deleting_without_a_selection_reports_the_problem(self):
         result = self.browser.delete_entry(self.store, None, "All categories", "")

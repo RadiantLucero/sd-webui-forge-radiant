@@ -3,6 +3,7 @@ from functools import partial
 from pathlib import Path
 
 import gradio as gr
+from gradio.context import get_blocks_context
 from prompt_workspace_data import (
     MAX_SECTIONS,
     PromptEntry,
@@ -480,6 +481,8 @@ def quick_browser(store, tabname):
 
 
 def add_quick_browser(component, **_kwargs):
+    if _kwargs.get("render", True) is False or get_blocks_context() is None:
+        return
     for tabname in ("txt2img", "img2img"):
         if component.elem_id == f"{tabname}_neg_prompt_row":
             quick_browser(workspace_store(), tabname)
