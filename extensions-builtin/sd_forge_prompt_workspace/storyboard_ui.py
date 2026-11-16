@@ -100,13 +100,14 @@ def rename_project(store, project_id, name):
 
 def delete_project(store, project_id):
     if not project_id:
-        return (gr.skip(),) * (MAX_SECTIONS + 10)
+        return *((gr.skip(),) * (MAX_SECTIONS + 10)), "Select a storyboard to delete"
     store.delete(project_id)
     return (
         gr.update(choices=project_choices(store), value=None),
         gr.update(choices=[], value=None),
         gr.update(choices=[], value=None),
         *empty_scene_values(),
+        "Storyboard deleted",
     )
 
 
@@ -127,10 +128,10 @@ def rename_scene(store, project_id, scene_id, name):
 
 
 def delete_scene(store, project_id, scene_id):
-    if not project_id:
-        return (gr.skip(), *([gr.skip()] * (MAX_SECTIONS + 7)))
+    if not project_id or not scene_id:
+        return *((gr.skip(),) * (MAX_SECTIONS + 8)), "Select a storyboard and scene to delete"
     store.delete_scene(project_id, scene_id)
-    return gr.update(choices=scene_choices(store.load(project_id)), value=None), *empty_scene_values()
+    return gr.update(choices=scene_choices(store.load(project_id)), value=None), *empty_scene_values(), "Scene deleted"
 
 
 def update_text(store, field, project_id, scene_id, value, section_index=None):
@@ -195,30 +196,30 @@ def save_variant(store, project_id, scene_id, name):
 
 
 def load_variant(store, project_id, scene_id, variant_id):
-    if not project_id:
-        return [gr.skip()] * (MAX_SECTIONS + 7)
+    if not project_id or not scene_id or not variant_id:
+        return *((gr.skip(),) * (MAX_SECTIONS + 7)), "Select a storyboard, scene and variant to load"
     store.select_variant(project_id, scene_id, variant_id)
-    return scene_values(store, project_id, scene_id)
+    return *scene_values(store, project_id, scene_id), ""
 
 
 def step_variant(store, project_id, scene_id, direction):
-    if not project_id:
-        return [gr.skip()] * (MAX_SECTIONS + 7)
+    if not project_id or not scene_id:
+        return *((gr.skip(),) * (MAX_SECTIONS + 7)), "Select a storyboard and scene first"
     _, scene = get_scene(store, project_id, scene_id)
     variants = scene["variants"]
     if not variants:
-        raise ValueError("This scene has no saved variants")
+        return *((gr.skip(),) * (MAX_SECTIONS + 7)), "This scene has no saved variants"
     current = next((index for index, item in enumerate(variants) if item["id"] == scene["selected_variant"]), 0)
     store.select_variant(project_id, scene_id, variants[(current + direction) % len(variants)]["id"])
-    return scene_values(store, project_id, scene_id)
+    return *scene_values(store, project_id, scene_id), ""
 
 
 def delete_variant(store, project_id, scene_id, variant_id):
-    if not project_id:
-        return (gr.skip(),) * 4
+    if not project_id or not scene_id or not variant_id:
+        return *((gr.skip(),) * 4), "Select a storyboard, scene and variant to delete"
     store.delete_variant(project_id, scene_id, variant_id)
     _, scene = get_scene(store, project_id, scene_id)
-    return gr.update(choices=variant_choices(scene), value=None), "", "", None
+    return gr.update(choices=variant_choices(scene), value=None), "", "", None, "Variant deleted"
 
 
 def variant_prompt(store, project_id, scene_id, variant_id):
@@ -236,75 +237,80 @@ def preview_draft(store, project_id, scene_id):
 
 def storyboard_ui(library, apply_js):
     store = StoryboardStore(library.path.parent / "storyboards", library)
-    with gr.Blocks(analytics_enabled=False) as ui:
+    with gr.Blocks(analytics_enabled=False) as ui, gr.Column(elem_classes=["prompt-workspace-ui"]):
         gr.Markdown("Create storyboards, arrange scenes and save named variants. Variants keep their resolved prompt; editing a loaded variant creates a separate draft.")
-        with gr.Row():
+        with gr.Row(equal_height=False):
             project = gr.Dropdown(label="Storyboard", choices=project_choices(store))
             project_name = gr.Textbox(label="New storyboard name")
-            directory = gr.Textbox(label="Storyboard image directory", value=str(library.path.parent / "storyboard-images"))
-            create = gr.Button("Create storyboard")
-            rename = gr.Button("Rename storyboard")
-            delete = gr.Button("Delete storyboard")
-            set_directory = gr.Button("Save image directory")
-        with gr.Row():
+        with gr.Row(equal_height=False, elem_classes=["prompt-workspace-actions"]):
+            create = gr.Button("Create storyboard", size="sm", scale=0, min_width=0)
+            rename = gr.Button("Rename storyboard", size="sm", scale=0, min_width=0)
+            delete = gr.Button("Delete storyboard", size="sm", scale=0, min_width=0)
+        directory = gr.Textbox(label="Storyboard image directory", value=str(library.path.parent / "storyboard-images"))
+        set_directory = gr.Button("Save image directory", size="sm", scale=0, min_width=0)
+        project_status = gr.Markdown()
+        with gr.Row(equal_height=False):
             scene = gr.Dropdown(label="Scene")
             scene_name = gr.Textbox(label="New scene name")
-            create_scene_button = gr.Button("Add scene")
-            refresh_scene = gr.Button("Refresh scene")
-            rename_scene_button = gr.Button("Rename scene")
-            move_up = gr.Button("Move earlier")
-            move_down = gr.Button("Move later")
-            delete_scene_button = gr.Button("Delete scene")
+        with gr.Row(equal_height=False, elem_classes=["prompt-workspace-actions"]):
+            create_scene_button = gr.Button("Add scene", size="sm", scale=0, min_width=0)
+            refresh_scene = gr.Button("Refresh scene", size="sm", scale=0, min_width=0)
+            rename_scene_button = gr.Button("Rename scene", size="sm", scale=0, min_width=0)
+            move_up = gr.Button("Move earlier", size="sm", scale=0, min_width=0)
+            move_down = gr.Button("Move later", size="sm", scale=0, min_width=0)
+            delete_scene_button = gr.Button("Delete scene", size="sm", scale=0, min_width=0)
+        scene_status = gr.Markdown()
         with gr.Accordion("Project characters, locations and objects", open=False):
-            with gr.Row():
+            with gr.Row(equal_height=False):
                 asset = gr.Dropdown(label="Project asset")
                 asset_kind = gr.Dropdown(label="Type", choices=["Character", "Location", "Object"], value="Character")
                 asset_name = gr.Textbox(label="Name")
             asset_text = gr.Textbox(label="Base description (library references are supported)", lines=2)
-            with gr.Row():
-                snippet = gr.Dropdown(label="Library snippet", choices=snippet_choices(library))
-                refresh_snippets = gr.Button("Refresh library")
-                snippet_to_asset = gr.Button("Insert into base description")
-                snippet_to_outfit = gr.Button("Insert into outfit")
-            with gr.Row():
-                add_asset_button = gr.Button("Add asset")
-                update_asset_button = gr.Button("Update selected asset")
-            with gr.Row():
+            snippet = gr.Dropdown(label="Library snippet", choices=snippet_choices(library))
+            with gr.Row(equal_height=False, elem_classes=["prompt-workspace-actions"]):
+                refresh_snippets = gr.Button("Refresh library", size="sm", scale=0, min_width=0)
+                snippet_to_asset = gr.Button("Insert into base description", size="sm", scale=0, min_width=0)
+                snippet_to_outfit = gr.Button("Insert into outfit", size="sm", scale=0, min_width=0)
+            with gr.Row(equal_height=False, elem_classes=["prompt-workspace-actions"]):
+                add_asset_button = gr.Button("Add asset", size="sm", scale=0, min_width=0)
+                update_asset_button = gr.Button("Update selected asset", size="sm", scale=0, min_width=0)
+            with gr.Row(equal_height=False):
                 outfit = gr.Dropdown(label="Outfit")
                 outfit_name = gr.Textbox(label="Outfit name")
-                outfit_text = gr.Textbox(label="Outfit description")
-                add_outfit_button = gr.Button("Save outfit")
-                new_outfit = gr.Button("New outfit")
+            outfit_text = gr.Textbox(label="Outfit description")
+            with gr.Row(equal_height=False, elem_classes=["prompt-workspace-actions"]):
+                add_outfit_button = gr.Button("Save outfit", size="sm", scale=0, min_width=0)
+                new_outfit = gr.Button("New outfit", size="sm", scale=0, min_width=0)
             asset_status = gr.Markdown()
-        with gr.Row():
-            add_selected_asset = gr.Button("Add selected asset and outfit to scene")
-            selection = gr.Dropdown(label="Assets in scene")
-            remove_selected_asset = gr.Button("Remove asset from scene")
+        selection = gr.Dropdown(label="Assets in scene")
+        with gr.Row(equal_height=False, elem_classes=["prompt-workspace-actions"]):
+            add_selected_asset = gr.Button("Add selected asset and outfit to scene", size="sm", scale=0, min_width=0)
+            remove_selected_asset = gr.Button("Remove asset from scene", size="sm", scale=0, min_width=0)
         template = gr.Textbox(label="Scene template", lines=3, interactive=False, info="Place sections using <<Section>> and write transitions freely.")
-        with gr.Row():
+        with gr.Row(equal_height=False):
             sections = [gr.Textbox(label=f"Section {index + 1}", lines=2, visible=False, interactive=False) for index in range(5)]
-        with gr.Row():
+        with gr.Row(equal_height=False):
             sections += [gr.Textbox(label=f"Section {index + 1}", lines=2, visible=False, interactive=False) for index in range(5, MAX_SECTIONS)]
         negative = gr.Textbox(label="Negative prompt", lines=2, interactive=False)
         draft_status = gr.Markdown()
-        with gr.Row():
-            preview = gr.Button("Preview draft")
-            refresh_context = gr.Button("Use current library and project assets")
-            variant_name = gr.Textbox(label="New variant name")
-            save = gr.Button("Save draft as new variant")
-        with gr.Row():
-            variant = gr.Dropdown(label="Scene variant")
-            previous_variant = gr.Button("Previous variant")
-            next_variant = gr.Button("Next variant")
-            load = gr.Button("Load and select variant")
-            delete_variant_button = gr.Button("Delete variant")
+        variant_name = gr.Textbox(label="New variant name")
+        with gr.Row(equal_height=False, elem_classes=["prompt-workspace-actions"]):
+            preview = gr.Button("Preview draft", size="sm", scale=0, min_width=0)
+            refresh_context = gr.Button("Use current library and project assets", size="sm", scale=0, min_width=0)
+            save = gr.Button("Save draft as new variant", size="sm", scale=0, min_width=0)
+        variant = gr.Dropdown(label="Scene variant")
+        with gr.Row(equal_height=False, elem_classes=["prompt-workspace-actions"]):
+            previous_variant = gr.Button("Previous variant", size="sm", scale=0, min_width=0)
+            next_variant = gr.Button("Next variant", size="sm", scale=0, min_width=0)
+            load = gr.Button("Load and select variant", size="sm", scale=0, min_width=0)
+            delete_variant_button = gr.Button("Delete variant", size="sm", scale=0, min_width=0)
         prompt = gr.Textbox(label="Resolved prompt", lines=4, interactive=False)
         negative_result = gr.Textbox(label="Resolved negative prompt", lines=2, interactive=False)
         image = gr.Image(label="Selected variant image", interactive=False, type="filepath")
-        with gr.Row():
-            apply_txt = gr.Button("Apply selected variant to txt2img")
-            apply_img = gr.Button("Apply selected variant to img2img")
-            publish = gr.Button("Publish storyboard")
+        with gr.Row(equal_height=False, elem_classes=["prompt-workspace-actions"]):
+            apply_txt = gr.Button("Apply selected variant to txt2img", size="sm", scale=0, min_width=0)
+            apply_img = gr.Button("Apply selected variant to img2img", size="sm", scale=0, min_width=0)
+            publish = gr.Button("Publish storyboard", size="sm", scale=0, min_width=0)
         status = gr.Markdown()
         kind = gr.Textbox(value="prompt", visible=False)
         selected_prompt = gr.Textbox(visible=False)
@@ -317,8 +323,7 @@ def storyboard_ui(library, apply_js):
         project.input(lambda project_id: store.load(project_id)["name"], project, project_name, **common)
         rename.click(partial(rename_project, store), [project, project_name], project, **common)
         delete.click(
-            partial(delete_project, store), project, [project, scene, asset, *scene_outputs],
-            js='(project) => confirm("Delete this storyboard? Its image files will not be deleted.") ? [project] : [null]',
+            partial(delete_project, store), project, [project, scene, asset, *scene_outputs, project_status],
             **common,
         )
         set_directory.click(lambda project_id, path: (store.set_image_directory(project_id, path), "Image directory saved")[1], [project, directory], status, **common)
@@ -330,8 +335,7 @@ def storyboard_ui(library, apply_js):
         move_up.click(partial(move_scene, store, direction=-1), [project, scene], scene, **common)
         move_down.click(partial(move_scene, store, direction=1), [project, scene], scene, **common)
         delete_scene_button.click(
-            partial(delete_scene, store), [project, scene], [scene, *scene_outputs],
-            js='(project, scene) => confirm("Delete this scene? Its image files will not be deleted.") ? [project, scene] : [null, scene]',
+            partial(delete_scene, store), [project, scene], [scene, *scene_outputs, scene_status],
             **common,
         )
         asset.input(partial(load_asset, store), [project, asset], [asset_kind, asset_name, asset_text, outfit, outfit_name, outfit_text], **common)
@@ -356,20 +360,17 @@ def storyboard_ui(library, apply_js):
         )
         save.click(partial(save_variant, store), [project, scene, variant_name], [variant, prompt, negative_result, image], **common)
         load.click(
-            partial(load_variant, store), [project, scene, variant], scene_outputs,
-            js='(project, scene, variant) => confirm("Replace the current draft with this saved variant?") ? [project, scene, variant] : [null, scene, variant]',
+            partial(load_variant, store), [project, scene, variant], [*scene_outputs, draft_status],
             **common,
         )
         for button, direction in ((previous_variant, -1), (next_variant, 1)):
             button.click(
-                partial(step_variant, store, direction=direction), [project, scene], scene_outputs,
-                js='(project, scene) => confirm("Replace the current draft with another saved variant?") ? [project, scene] : [null, scene]',
+                partial(step_variant, store, direction=direction), [project, scene], [*scene_outputs, draft_status],
                 **common,
             )
         delete_variant_button.click(
             partial(delete_variant, store),
-            [project, scene, variant], [variant, prompt, negative_result, image],
-            js='(project, scene, variant) => confirm("Delete this variant? Its image file will not be deleted.") ? [project, scene, variant] : [null, scene, variant]',
+            [project, scene, variant], [variant, prompt, negative_result, image, draft_status],
             **common,
         )
         for button, tab in ((apply_txt, "txt2img"), (apply_img, "img2img")):
@@ -378,8 +379,8 @@ def storyboard_ui(library, apply_js):
                 [kind, selected_prompt, selected_negative], **common,
             ).success(
                 fn=None,
-                js=f'function(kind, prompt, negative) {{ if (!confirm("Replace the current prompts?")) return []; return ({apply_js(tab)})(kind, prompt, negative); }}',
-                inputs=[kind, selected_prompt, selected_negative], show_progress="hidden",
+                js=apply_js(tab),
+                inputs=[kind, selected_prompt, selected_negative], outputs=status, show_progress="hidden",
             )
         publish.click(lambda project_id: f"Published to: {store.publish(project_id)}", project, status, **common)
     return ui
@@ -439,13 +440,14 @@ def gallery_callback(library_factory):
             if component.elem_id == f"{tab}_gallery":
                 library = library_factory()
                 store = StoryboardStore(library.path.parent / "storyboards", library)
-                with gr.Accordion("Assign image to storyboard", open=False):
-                    with gr.Row():
+                with gr.Accordion("Assign image to storyboard", open=False, elem_classes=["prompt-workspace-ui"]):
+                    with gr.Row(equal_height=False):
                         project = gr.Dropdown(label="Storyboard", choices=project_choices(store))
                         scene = gr.Dropdown(label="Scene")
                         variant = gr.Dropdown(label="Variant")
-                        refresh = gr.Button("Refresh")
-                        take = gr.Button("Use selected image")
+                    with gr.Row(equal_height=False, elem_classes=["prompt-workspace-actions"]):
+                        refresh = gr.Button("Refresh", size="sm", scale=0, min_width=0)
+                        take = gr.Button("Use selected image", size="sm", scale=0, min_width=0)
                     status = gr.Markdown()
                     index = gr.Number(visible=False, value=-1)
                     project.input(partial(gallery_project, store), project, [scene, variant], show_progress="hidden")

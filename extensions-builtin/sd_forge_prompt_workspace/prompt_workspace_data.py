@@ -3,8 +3,12 @@ import os
 import re
 import tempfile
 import uuid
+from collections.abc import Callable
 from dataclasses import asdict, dataclass
+from functools import wraps
 from pathlib import Path
+from threading import RLock
+from typing import ParamSpec, TypeVar
 
 FORMAT_VERSION = 1
 ENTRY_KINDS = {"snippet", "prompt"}
@@ -14,6 +18,18 @@ SECTION_PATTERN = re.compile(r"<<([^<>]*)>>")
 # A single pair of angle brackets without a colon, so LoRA syntax such as <lora:name:1> is not matched.
 REFERENCE_PATTERN = re.compile(r"(?<!<)<([\w-]+)>(?!>)")
 REFERENCE_NAME_PATTERN = re.compile(r"[\w-]+")
+_write_lock = RLock()
+P = ParamSpec("P")
+T = TypeVar("T")
+
+
+def _lock_writes(function: Callable[P, T]) -> Callable[P, T]:
+    @wraps(function)
+    def wrapped(*args: P.args, **kwargs: P.kwargs) -> T:
+        with _write_lock:
+            return function(*args, **kwargs)
+
+    return wrapped
 
 
 def library_path(extension_dir: Path, configured_directory: str) -> Path:
@@ -105,6 +121,7 @@ class PromptWorkspaceStore:
     def section_names(self) -> list[str]:
         return self._read()[1]
 
+    @_lock_writes
     def save_section_names(self, names: list[str]) -> list[str]:
         entries, _ = self._read()
         cleaned = validate_section_names(names)
@@ -139,6 +156,7 @@ class PromptWorkspaceStore:
         entry, prompt, negative = self.select_entry(entry_id)
         return entry.kind, prompt, negative
 
+    @_lock_writes
     def save_entry(
         self,
         entry_id: str | None,
@@ -158,7 +176,89 @@ class PromptWorkspaceStore:
         existing = next((entry for entry in entries if entry.id == entry_id), None)
         if entry_id is not None and existing is None:
             raise ValueError("The selected prompt entry no longer exists")
+        return self._save_entry(
+            entries, section_names, existing, kind=kind, name=name, category=category, tags=tags,
+            prompt=prompt, negative_prompt=negative_prompt, variant_name=variant_name,
+            reference=reference, section=section, sections=sections,
+        )
 
+    @_lock_writes
+    def upsert_entry(
+        self,
+        *,
+        kind: str,
+        name: str,
+        category: str,
+        tags: list[str],
+        prompt: str,
+        negative_prompt: str,
+        variant_name: str = "",
+        reference: str = "",
+        section: str = "",
+        sections: list[dict[str, str]] | None = None,
+        new_variant: bool = False,
+    ) -> PromptEntry:
+        entries, section_names = self._read()
+        if kind not in ENTRY_KINDS:
+            raise ValueError(f"Unsupported prompt entry kind: {kind}")
+        name = self._required_text(name, "Name")
+        category = self._required_text(category, "Category")
+        matches = [entry for entry in entries if entry.name == name and entry.category == category]
+        if any(entry.kind != kind for entry in matches):
+            raise ValueError(f"The name '{name}' is already used by another entry type in '{category}'")
+
+        existing = None
+        variant_group = None
+        if kind == "snippet":
+            if new_variant:
+                raise ValueError("Only a prompt can have variants")
+            if len(matches) > 1:
+                raise ValueError(f"Multiple entries named '{name}' exist in '{category}'; resolve them before saving")
+            existing = matches[0] if matches else None
+        else:
+            variant_name = self._required_text(variant_name or "Default", "Variant name")
+            groups = {entry.variant_group for entry in matches}
+            if len(groups) > 1:
+                raise ValueError(f"Multiple prompts named '{name}' exist in '{category}'; resolve them before saving")
+            variant_group = next(iter(groups), None)
+            if variant_group and any(
+                entry.variant_group == variant_group and (entry.name != name or entry.category != category)
+                for entry in entries
+            ):
+                raise ValueError("This prompt's variants have different names or categories; resolve them before saving")
+            variant_matches = [entry for entry in matches if entry.variant_name.casefold() == variant_name.casefold()]
+            if len(variant_matches) > 1:
+                raise ValueError(f"Multiple variants named '{variant_name}' exist; resolve them before saving")
+            existing = variant_matches[0] if variant_matches else None
+            if new_variant and not variant_group:
+                raise ValueError("Save the prompt before adding a variant")
+            if new_variant and existing:
+                raise ValueError(f"A variant named '{variant_name}' already exists")
+
+        return self._save_entry(
+            entries, section_names, existing, kind=kind, name=name, category=category, tags=tags,
+            prompt=prompt, negative_prompt=negative_prompt, variant_name=variant_name,
+            reference=reference, section=section, sections=sections, variant_group=variant_group,
+        )
+
+    def _save_entry(
+        self,
+        entries: list[PromptEntry],
+        section_names: list[str],
+        existing: PromptEntry | None,
+        *,
+        kind: str,
+        name: str,
+        category: str,
+        tags: list[str],
+        prompt: str,
+        negative_prompt: str,
+        variant_name: str,
+        reference: str,
+        section: str,
+        sections: list[dict[str, str]] | None,
+        variant_group: str | None = None,
+    ) -> PromptEntry:
         is_prompt = kind == "prompt"
         entry = self._make_entry(
             id=existing.id if existing else str(uuid.uuid4()),
@@ -168,7 +268,7 @@ class PromptWorkspaceStore:
             tags=tags,
             prompt=prompt,
             negative_prompt=negative_prompt,
-            variant_group=(existing.variant_group if existing and existing.variant_group else str(uuid.uuid4())) if is_prompt else None,
+            variant_group=(existing.variant_group if existing and existing.variant_group else variant_group or str(uuid.uuid4())) if is_prompt else None,
             variant_name=(variant_name or "Default") if is_prompt else "",
             reference="" if is_prompt else reference,
             section="" if is_prompt else section,
@@ -181,6 +281,7 @@ class PromptWorkspaceStore:
                 raise ValueError(f"<{existing.reference}> is still used by: {entry.name}")
         return self._store(entries, section_names, entry, replace_id=existing.id if existing else None)
 
+    @_lock_writes
     def save_variant(
         self,
         entry_id: str,
@@ -212,6 +313,7 @@ class PromptWorkspaceStore:
         )
         return self._store(entries, section_names, entry, replace_id=None)
 
+    @_lock_writes
     def delete_entry(self, entry_id: str) -> bool:
         entries, section_names = self._read()
         entry = next((item for item in entries if item.id == entry_id), None)
@@ -368,12 +470,21 @@ class PromptWorkspaceStore:
         for entry in entries:
             if entry.id == candidate.id:
                 continue
+            same_name = entry.name == candidate.name and entry.category == candidate.category
             if (
                 candidate.kind == "prompt"
+                and entry.kind == "prompt"
                 and entry.variant_group == candidate.variant_group
-                and entry.variant_name.casefold() == candidate.variant_name.casefold()
             ):
-                raise ValueError(f"A variant named '{candidate.variant_name}' already exists")
+                if not same_name:
+                    raise ValueError("This prompt's variants have different names or categories; resolve them before saving")
+                if entry.variant_name.casefold() == candidate.variant_name.casefold():
+                    raise ValueError(f"A variant named '{candidate.variant_name}' already exists")
+            if same_name:
+                if entry.kind != candidate.kind:
+                    raise ValueError(f"The name '{candidate.name}' is already used by another entry type in '{candidate.category}'")
+                if candidate.kind == "snippet" or entry.variant_group != candidate.variant_group:
+                    raise ValueError(f"The name '{candidate.name}' is already used in '{candidate.category}'")
             if candidate.reference and entry.reference.casefold() == candidate.reference.casefold():
                 raise ValueError(f"The reference name <{candidate.reference}> is already used by '{entry.name}'")
 

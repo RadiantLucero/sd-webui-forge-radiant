@@ -10,9 +10,16 @@ from PIL import Image
 EXTENSION_DIR = Path(__file__).resolve().parents[1] / "extensions-builtin" / "sd_forge_prompt_workspace"
 sys.path.insert(0, str(EXTENSION_DIR))
 
-from prompt_workspace_data import PromptWorkspaceStore
+from prompt_workspace_data import MAX_SECTIONS, PromptWorkspaceStore
 from storyboard_data import StoryboardStore
-from storyboard_ui import take_image
+from storyboard_ui import (
+    delete_project,
+    delete_scene,
+    delete_variant,
+    load_variant,
+    step_variant,
+    take_image,
+)
 
 
 class StoryboardTests(unittest.TestCase):
@@ -132,6 +139,42 @@ class StoryboardTests(unittest.TestCase):
         with Image.open(image_path) as image:
             self.assertEqual((0, 0, 255), image.getpixel((0, 0)))
             self.assertEqual("second", image.info["parameters"])
+
+    def test_storyboard_actions_report_missing_selections_without_clearing_inputs(self):
+        cases = (
+            (delete_project(self.store, None), MAX_SECTIONS + 11, "Select a storyboard to delete"),
+            (delete_scene(self.store, self.pid, None), MAX_SECTIONS + 9, "Select a storyboard and scene to delete"),
+            (load_variant(self.store, self.pid, self.sid, None), MAX_SECTIONS + 8, "Select a storyboard, scene and variant to load"),
+            (step_variant(self.store, None, None, 1), MAX_SECTIONS + 8, "Select a storyboard and scene first"),
+            (step_variant(self.store, self.pid, self.sid, 1), MAX_SECTIONS + 8, "This scene has no saved variants"),
+            (delete_variant(self.store, self.pid, self.sid, None), 5, "Select a storyboard, scene and variant to delete"),
+        )
+        for result, length, message in cases:
+            with self.subTest(message=message):
+                self.assertEqual(length, len(result))
+                self.assertEqual(message, result[-1])
+                self.assertTrue(all(value == {"__type__": "update"} for value in result[:-1]))
+        self.assertEqual(self.sid, self.store.load(self.pid)["scenes"][0]["id"])
+
+    def test_variant_navigation_and_deletion_take_effect_immediately(self):
+        self.store.update_draft(self.pid, self.sid, "section", "first draft", 0)
+        first = self.store.save_variant(self.pid, self.sid, "First")
+        self.store.update_draft(self.pid, self.sid, "section", "second draft", 0)
+        second = self.store.save_variant(self.pid, self.sid, "Second")
+        self.store.update_draft(self.pid, self.sid, "section", "unsaved changes", 0)
+
+        result = step_variant(self.store, self.pid, self.sid, -1)
+        scene = self.store.load(self.pid)["scenes"][0]
+        self.assertEqual(first["id"], scene["selected_variant"])
+        self.assertEqual("first draft", scene["draft"]["sections"][0]["text"])
+        self.assertEqual((MAX_SECTIONS + 8, ""), (len(result), result[-1]))
+
+        result = load_variant(self.store, self.pid, self.sid, second["id"])
+        self.assertEqual(second["id"], self.store.load(self.pid)["scenes"][0]["selected_variant"])
+        self.assertEqual((MAX_SECTIONS + 8, ""), (len(result), result[-1]))
+        result = delete_variant(self.store, self.pid, self.sid, second["id"])
+        self.assertEqual("Variant deleted", result[-1])
+        self.assertEqual([first["id"]], [variant["id"] for variant in self.store.load(self.pid)["scenes"][0]["variants"]])
 
     def test_new_scenes_use_configured_section_names(self):
         self.library.save_section_names(["Character", "Place"])

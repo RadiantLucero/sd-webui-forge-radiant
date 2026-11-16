@@ -3,8 +3,11 @@ import json
 import sys
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from copy import copy
+from dataclasses import replace
 from pathlib import Path
+from threading import Event
 from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
@@ -172,6 +175,154 @@ class PromptWorkspaceStoreTests(unittest.TestCase):
         self.assertTrue(self.store.delete_entry(updated.id))
         self.assertFalse(self.store.delete_entry(updated.id))
         self.assertEqual([], self.store.load())
+
+    def test_upserts_entries_by_category_and_name(self):
+        first = self.store.upsert_entry(
+            kind="snippet", name=" Fog ", category=" Weather ", tags=[],
+            prompt="light fog", negative_prompt="",
+        )
+        updated = self.store.upsert_entry(
+            kind="snippet", name="Fog", category="Weather", tags=["mood"],
+            prompt="thick fog", negative_prompt="",
+        )
+        other_category = self.store.upsert_entry(
+            kind="snippet", name="Fog", category="Lighting", tags=[],
+            prompt="backlit fog", negative_prompt="",
+        )
+        other_case = self.store.upsert_entry(
+            kind="snippet", name="fog", category="Weather", tags=[],
+            prompt="low fog", negative_prompt="",
+        )
+
+        self.assertEqual(first.id, updated.id)
+        self.assertEqual("thick fog", updated.prompt)
+        self.assertEqual(3, len({updated.id, other_category.id, other_case.id}))
+        with self.assertRaisesRegex(ValueError, "another entry type"):
+            self.store.upsert_entry(
+                kind="prompt", name="Fog", category="Weather", tags=[],
+                prompt="a foggy scene", negative_prompt="",
+            )
+        with self.assertRaisesRegex(ValueError, "already used"):
+            self.store.save_entry(
+                None, kind="snippet", name="Fog", category="Weather", tags=[],
+                prompt="duplicate", negative_prompt="",
+            )
+        self.assertEqual(3, len(self.store.load()))
+
+    def test_overlapping_saves_from_separate_stores_preserve_both_entries(self):
+        second_store = PromptWorkspaceStore(self.path)
+        first_at_write = Event()
+        release_first = Event()
+        second_started = Event()
+        second_read = Event()
+        original_write = self.store._write
+        original_read = second_store._read
+
+        def delayed_write(entries, sections):
+            first_at_write.set()
+            if not release_first.wait(5):
+                raise TimeoutError("First save was not released")
+            original_write(entries, sections)
+
+        def observed_read():
+            result = original_read()
+            second_read.set()
+            return result
+
+        def save_second():
+            second_started.set()
+            return second_store.upsert_entry(
+                kind="snippet", name="Second", category="Weather", tags=[],
+                prompt="rain", negative_prompt="",
+            )
+
+        with patch.object(self.store, "_write", side_effect=delayed_write), patch.object(second_store, "_read", side_effect=observed_read):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                first = pool.submit(
+                    self.store.upsert_entry, kind="snippet", name="First", category="Weather",
+                    tags=[], prompt="fog", negative_prompt="",
+                )
+                try:
+                    self.assertTrue(first_at_write.wait(5))
+                    second = pool.submit(save_second)
+                    self.assertTrue(second_started.wait(5))
+                    second_read.wait(0.1)
+                finally:
+                    release_first.set()
+                first.result(timeout=5)
+                second.result(timeout=5)
+
+        self.assertEqual({"First", "Second"}, {entry.name for entry in self.store.load()})
+
+    def test_upserts_prompt_variants_without_losing_their_group(self):
+        base = self.store.upsert_entry(
+            kind="prompt", name="Station", category="Scenes", variant_name="Base",
+            tags=["travel"], prompt="a station", negative_prompt="",
+        )
+        fog = self.store.upsert_entry(
+            kind="prompt", name="Station", category="Scenes", variant_name="Fog",
+            tags=["night"], prompt="a foggy station", negative_prompt="",
+        )
+        updated = self.store.upsert_entry(
+            kind="prompt", name="Station", category="Scenes", variant_name="fog",
+            tags=["dawn"], prompt="fog at dawn", negative_prompt="",
+        )
+        self.assertEqual(base.variant_group, fog.variant_group)
+        self.assertEqual(fog.id, updated.id)
+        self.assertEqual(["dawn"], updated.tags)
+        self.assertEqual({base.id, fog.id}, {entry.id for entry in self.store.variants(base.id)})
+        with self.assertRaisesRegex(ValueError, "already exists"):
+            self.store.upsert_entry(
+                kind="prompt", name="Station", category="Scenes", variant_name="FOG",
+                tags=[], prompt="duplicate", negative_prompt="", new_variant=True,
+            )
+        with self.assertRaisesRegex(ValueError, "Save the prompt"):
+            self.store.upsert_entry(
+                kind="prompt", name="New", category="Scenes", variant_name="First",
+                tags=[], prompt="new scene", negative_prompt="", new_variant=True,
+            )
+        self.assertEqual(2, len(self.store.load()))
+
+    def test_legacy_name_and_variant_group_conflicts_do_not_overwrite_data(self):
+        snippet = self.store.save_entry(
+            None, kind="snippet", name="Fog", category="Weather", tags=[],
+            prompt="first", negative_prompt="",
+        )
+        duplicate = replace(snippet, id="legacy-duplicate", prompt="second")
+        self.store._write([snippet, duplicate], self.store.section_names())
+        before = self.path.read_bytes()
+        with self.assertRaisesRegex(ValueError, "Multiple entries"):
+            self.store.upsert_entry(
+                kind="snippet", name="Fog", category="Weather", tags=[],
+                prompt="replacement", negative_prompt="",
+            )
+        self.assertEqual(before, self.path.read_bytes())
+        self.assertTrue(self.store.delete_entry(duplicate.id))
+        self.assertEqual(snippet.id, self.store.upsert_entry(
+            kind="snippet", name="Fog", category="Weather", tags=[],
+            prompt="replacement", negative_prompt="",
+        ).id)
+
+        prompt = self.save_prompt(name="Legacy")
+        separate_group = replace(prompt, id="legacy-group", variant_group="other", variant_name="Other")
+        self.store._write([prompt, separate_group], self.store.section_names())
+        before = self.path.read_bytes()
+        with self.assertRaisesRegex(ValueError, "Multiple prompts"):
+            self.store.upsert_entry(
+                kind="prompt", name="Legacy", category="Weather", variant_name="New",
+                tags=[], prompt="replacement", negative_prompt="",
+            )
+        self.assertEqual(before, self.path.read_bytes())
+
+        split_group = replace(prompt, id="split-group", name="Different", variant_name="Other")
+        self.store._write([prompt, split_group], self.store.section_names())
+        before = self.path.read_bytes()
+        with self.assertRaisesRegex(ValueError, "different names or categories"):
+            self.store.upsert_entry(
+                kind="prompt", name="Legacy", category="Weather", variant_name="New",
+                tags=[], prompt="replacement", negative_prompt="",
+            )
+        self.assertEqual(before, self.path.read_bytes())
 
     def test_reports_invalid_json_instead_of_replacing_it(self):
         self.path.parent.mkdir(parents=True)
@@ -520,6 +671,7 @@ class PromptWorkspaceBrowserTests(unittest.TestCase):
     def setUpClass(cls):
         gradio = ModuleType("gradio")
         gradio.update = lambda **kwargs: kwargs
+        gradio.skip = lambda: {"__type__": "update"}
         modules = ModuleType("modules")
         modules.__path__ = []
         modules.scripts = SimpleNamespace(Script=object, AlwaysVisible=object())
@@ -558,6 +710,80 @@ class PromptWorkspaceBrowserTests(unittest.TestCase):
     def test_generation_can_use_default_library_before_settings_are_registered(self):
         with patch.object(self.browser.shared, "opts", SimpleNamespace(), create=True):
             self.assertEqual(EXTENSION_DIR / "data" / "library.json", self.browser.workspace_store().path)
+
+    def test_deleting_without_a_selection_reports_the_problem(self):
+        result = self.browser.delete_entry(self.store, None, "All categories", "")
+        self.assertEqual("Select a library entry to delete", result[-1])
+        self.assertTrue(all(value == {"__type__": "update"} for value in result[:-1]))
+
+    def test_saving_a_copy_keeps_the_original_selected_for_deletion(self):
+        original = self.store.save_entry(
+            None, kind="snippet", name="Original", category="Weather", tags=[],
+            prompt="old text", negative_prompt="",
+        )
+        result = self.browser.save_entry(
+            self.store, original.id, "Lighting", "", "snippet", "Copy", "", "Lighting",
+            "", "", "", "new text", "", "[]",
+        )
+        self.assertEqual(original.id, result[0]["value"])
+        self.assertIn(("Original — Weather", original.id), result[0]["choices"])
+        self.assertIn("Selected for deletion: 'Original — Weather'", result[-1])
+        copied = next(entry for entry in self.store.load() if entry.name == "Copy")
+        self.assertEqual("new text", copied.prompt)
+
+        deleted = self.browser.delete_entry(self.store, original.id, "All categories", "")
+        self.assertEqual(4, len(deleted))
+        self.assertIn("Original", deleted[-1])
+        self.assertEqual([copied], self.store.load())
+
+    def test_reference_conflicts_and_used_reference_deletions_are_reported_inline(self):
+        original = self.store.save_entry(
+            None, kind="snippet", name="Character", category="People", tags=[],
+            prompt="a person", negative_prompt="", reference="character",
+        )
+        before = self.store.load()
+        result = self.browser.save_entry(
+            self.store, original.id, "All categories", "", "snippet", "Copy", "", "People",
+            "", "character", "", "a person", "", "[]",
+        )
+        self.assertTrue(all(value == {"__type__": "update"} for value in result[:-1]))
+        self.assertIn("reference name <character> is already used", result[-1])
+        self.assertEqual(before, self.store.load())
+
+        self.store.save_entry(
+            None, kind="snippet", name="Scene", category="People", tags=[],
+            prompt="<character> walking", negative_prompt="",
+        )
+        result = self.browser.delete_entry(self.store, original.id, "All categories", "")
+        self.assertTrue(all(value == {"__type__": "update"} for value in result[:-1]))
+        self.assertIn("still used by: Scene", result[-1])
+        self.assertEqual(2, len(self.store.load()))
+
+    def test_saving_a_new_variant_uses_the_editor_values(self):
+        original = self.store.upsert_entry(
+            kind="prompt", name="Station", category="Scenes", variant_name="Base",
+            tags=["travel"], prompt="a station", negative_prompt="",
+        )
+        result = self.browser.save_entry(
+            self.store, original.id, "All categories", "", "prompt", "Station", "Night", "Scenes",
+            "night, rain", "", "", "a station at night", "bright", "[]", new_variant=True,
+        )
+        self.assertEqual(original.id, result[0]["value"])
+        variants = self.store.variants(original.id)
+        night = next(entry for entry in variants if entry.variant_name == "Night")
+        self.assertEqual(["night", "rain"], night.tags)
+        self.assertEqual("a station at night", night.prompt)
+        self.assertEqual("bright", night.negative_prompt)
+        self.assertIn("Selected for deletion: 'Station · Base — Scenes'", result[-1])
+
+    def test_unused_snippet_reference_can_be_deleted(self):
+        snippet = self.store.save_entry(
+            None, kind="snippet", name="Unused", category="People", tags=[],
+            prompt="a person", negative_prompt="", reference="unused",
+        )
+        result = self.browser.delete_entry(self.store, snippet.id, "All categories", "")
+        self.assertIn("Deleted 'Unused <unused> — People'", result[-1])
+        self.assertEqual([], self.store.load())
 
     def test_grid_filters_and_clamps_pages(self):
         for index in range(23):

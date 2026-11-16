@@ -1,0 +1,14 @@
+.prompt-workspace-ui .gradio-button:not(.tool) {
+    width: fit-content;
+    max-width: 100%;
+    white-space: normal;
+    overflow-wrap: anywhere;
+}
+
+.prompt-workspace-ui .gradio-row {
+    align-items: flex-start;
+}
+
+.prompt-workspace-ui .gradio-row.prompt-workspace-actions {
+    align-items: center;
+}

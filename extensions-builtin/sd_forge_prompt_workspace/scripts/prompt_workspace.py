@@ -229,61 +229,69 @@ def insert_snippet(store, snippet_id, target, negative_prompt, names_json, *text
     return (*texts, negative_prompt)
 
 
-def save_entry(store, entry_id, kind, name, variant_name, category, tags, reference, section, source, negative_prompt, names_json, *texts):
-    entry = store.save_entry(
-        entry_id,
-        kind=kind,
-        name=name,
-        variant_name=variant_name,
-        category=category,
-        tags=[tag.strip() for tag in tags.split(",") if tag.strip()],
-        prompt=source,
-        negative_prompt=negative_prompt,
-        reference=reference,
-        section=section or "",
-        sections=make_sections(names_json, texts) if kind == "prompt" else None,
-    )
-    return (
-        gr.update(choices=entry_choices(store, entry.category, ""), value=entry.id),
-        gr.update(choices=category_choices(store), value=entry.category),
-        gr.update(value=""),
-        gr.update(choices=snippet_choices(store)),
-        f"Saved '{entry_label(entry)}'",
-    )
+def save_entry(store, entry_id, category_filter, search, kind, name, variant_name, category, tags, reference, section, source, negative_prompt, names_json, *texts, new_variant=False):
+    try:
+        entry = store.upsert_entry(
+            kind=kind,
+            name=name,
+            variant_name=variant_name,
+            category=category,
+            tags=[tag.strip() for tag in tags.split(",") if tag.strip()],
+            prompt=source,
+            negative_prompt=negative_prompt,
+            reference=reference,
+            section=section or "",
+            sections=make_sections(names_json, texts) if kind == "prompt" else None,
+            new_variant=new_variant,
+        )
+    except (ValueError, OSError) as error:
+        return gr.skip(), gr.skip(), gr.skip(), f"Could not save: {error}"
 
+    try:
+        selected = next((item for item in store.load() if item.id == entry_id), None)
+        choices = entry_choices(store, category_filter, search)
+        if selected and all(value != selected.id for _, value in choices):
+            choices.append((entry_label(selected), selected.id))
+        categories = category_choices(store)
+        snippets = snippet_choices(store)
+    except (ValueError, OSError) as error:
+        return gr.skip(), gr.skip(), gr.skip(), f"Saved '{entry_label(entry)}', but could not refresh the library: {error}"
 
-def save_variant(store, entry_id, variant_name, source, negative_prompt, names_json, *texts):
-    if not entry_id:
-        raise ValueError("Select a saved prompt before creating a variant")
-    entry = store.save_variant(
-        entry_id,
-        variant_name=variant_name,
-        prompt=source,
-        negative_prompt=negative_prompt,
-        sections=make_sections(names_json, texts),
-    )
+    status = f"Saved '{entry_label(entry)}'"
+    if selected and selected.id != entry.id:
+        status += f". Selected for deletion: '{entry_label(selected)}'"
+    elif entry_id and not selected:
+        status += ". The previous selection no longer exists"
     return (
-        gr.update(choices=entry_choices(store, entry.category, ""), value=entry.id),
-        gr.update(value=entry.category),
-        gr.update(value=""),
-        gr.skip(),
-        f"Saved variant '{entry.variant_name}'",
+        gr.update(choices=choices, value=selected.id if selected else None),
+        gr.update(choices=categories),
+        gr.update(choices=snippets),
+        status,
     )
 
 
 def delete_entry(store, entry_id, category_filter, search):
     if not entry_id:
-        return (gr.skip(), gr.skip(), *([gr.skip()] * len(editor_values(store, None))), gr.skip(), "Deletion cancelled")
-    if not store.delete_entry(entry_id):
-        raise ValueError("The selected prompt entry no longer exists")
-    categories = category_choices(store)
-    selected_category = category_filter if category_filter in categories else "All categories"
+        return gr.skip(), gr.skip(), gr.skip(), "Select a library entry to delete"
+    try:
+        entry = next((item for item in store.load() if item.id == entry_id), None)
+        if entry is None or not store.delete_entry(entry_id):
+            raise ValueError("The selected prompt entry no longer exists")
+    except (ValueError, OSError) as error:
+        return gr.skip(), gr.skip(), gr.skip(), f"Could not delete: {error}"
+
+    try:
+        categories = category_choices(store)
+        selected_category = category_filter if category_filter in categories else "All categories"
+        choices = entry_choices(store, selected_category, search)
+        snippets = snippet_choices(store)
+    except (ValueError, OSError) as error:
+        return gr.update(value=None), gr.skip(), gr.skip(), f"Deleted '{entry_label(entry)}', but could not refresh the library: {error}"
     return (
-        gr.update(choices=entry_choices(store, category_filter, search), value=None),
+        gr.update(choices=choices, value=None),
         gr.update(choices=categories, value=selected_category),
-        *load_entry(store, None),
-        gr.update(choices=snippet_choices(store), value=None),
-        "Entry deleted",
+        gr.update(choices=snippets, value=None),
+        f"Deleted '{entry_label(entry)}'",
     )
 
 
@@ -353,13 +361,12 @@ def quick_apply_js(tabname, replace):
     action = "true" if replace else "false"
     return f"""function(kind, prompt, negativePrompt) {{
         const replace = {action};
-        if ((kind === "prompt") !== replace) return [];
+        if ((kind === "prompt") !== replace) return [""];
         const app = gradioApp();
         const positive = app.getElementById({tab_id} + "_prompt")?.querySelector("textarea");
         const negative = app.getElementById({tab_id} + "_neg_prompt")?.querySelector("textarea");
-        if (!positive || !negative) throw new Error("Could not find the prompt fields");
+        if (!positive || !negative) return ["Could not find the prompt fields"];
         if (replace) {{
-            if (!confirm("Replace the current positive and negative prompts?")) return [];
             positive.value = prompt;
             negative.value = negativePrompt;
             updateInput(positive);
@@ -380,14 +387,14 @@ def quick_apply_js(tabname, replace):
                 updateInput(negative);
             }}
         }}
-        return [];
+        return [""];
     }}"""
 
 
 def quick_browser(store, tabname):
     categories, category_value, choices, page, last_page, total = quick_page(store, "All categories", "", 0)
-    with gr.Accordion("Prompt Workspace", open=False, elem_id=f"{tabname}_prompt_workspace_browser"):
-        with gr.Row():
+    with gr.Accordion("Prompt Workspace", open=False, elem_id=f"{tabname}_prompt_workspace_browser", elem_classes=["prompt-workspace-ui"]):
+        with gr.Row(equal_height=False):
             category = gr.Dropdown(label="Category", choices=categories, value=category_value)
             search = gr.Textbox(label="Search", placeholder="Search library")
             refresh = ToolButton(value=refresh_symbol, tooltip="Refresh library")
@@ -399,7 +406,7 @@ def quick_browser(store, tabname):
         grid_rows = []
         grid_buttons = []
         for row in range(QUICK_GRID_ROWS):
-            with gr.Row(visible=row * QUICK_GRID_COLUMNS < len(choices)) as grid_row:
+            with gr.Row(visible=row * QUICK_GRID_COLUMNS < len(choices), equal_height=False) as grid_row:
                 grid_rows.append(grid_row)
                 for column in range(QUICK_GRID_COLUMNS):
                     index = row * QUICK_GRID_COLUMNS + column
@@ -408,15 +415,17 @@ def quick_browser(store, tabname):
                             value=choices[index][0] if index < len(choices) else "",
                             visible=index < len(choices),
                             size="sm",
-                            min_width=100,
+                            scale=0,
+                            min_width=0,
                         )
                     )
-        with gr.Row():
-            previous_page = gr.Button("Previous", size="sm", interactive=False)
+        with gr.Row(equal_height=False, elem_classes=["prompt-workspace-actions"]):
+            previous_page = gr.Button("Previous", size="sm", scale=0, min_width=0, interactive=False)
             page_status = gr.Markdown(f"Page {page + 1} / {last_page + 1} · {total} entries")
-            next_page = gr.Button("Next", size="sm", interactive=page < last_page)
+            next_page = gr.Button("Next", size="sm", scale=0, min_width=0, interactive=page < last_page)
         preview = gr.Textbox(label="Selected entry", lines=2, interactive=False)
-        apply_saved = gr.Button("Replace with selected prompt", interactive=False)
+        quick_status = gr.Markdown()
+        apply_saved = gr.Button("Replace with selected prompt", size="sm", scale=0, min_width=0, interactive=False)
         page_index = gr.Number(value=0, precision=0, visible=False)
         grid_ids = gr.Textbox(value=json.dumps([entry_id for _, entry_id in choices]), visible=False)
         selected_id = gr.Textbox(visible=False)
@@ -461,13 +470,13 @@ def quick_browser(store, tabname):
                 inputs=[grid_ids, as_reference],
                 outputs=[*selected_values, preview, selected_id, apply_saved],
                 show_progress=False,
-            ).success(fn=None, js=quick_apply_js(tabname, False), inputs=selected_values, show_progress=False)
+            ).success(fn=None, js=quick_apply_js(tabname, False), inputs=selected_values, outputs=quick_status, show_progress=False)
         apply_saved.click(
             fn=partial(select_quick_prompt, store),
             inputs=selected_id,
             outputs=selected_values,
             show_progress=False,
-        ).success(fn=None, js=quick_apply_js(tabname, True), inputs=selected_values, show_progress=False)
+        ).success(fn=None, js=quick_apply_js(tabname, True), inputs=selected_values, outputs=quick_status, show_progress=False)
 
 
 def add_quick_browser(component, **_kwargs):
@@ -503,10 +512,9 @@ def apply_prompt_js(tabname):
         const app = gradioApp();
         const positive = app.getElementById({positive_id})?.querySelector("textarea");
         const negative = app.getElementById({negative_id})?.querySelector("textarea");
-        if (!positive || !negative) throw new Error("Could not find the {tabname} prompt fields");
+        if (!positive || !negative) return ["Could not find the {tabname} prompt fields"];
         if (!(prompt || "").trim() && !(negativePrompt || "").trim()) {{
-            alert("There is no resolved prompt to apply. Check the messages below the result.");
-            return [];
+            return ["There is no resolved prompt to apply. Check the messages below the result."];
         }}
 
         function apply(target, text, append, separator) {{
@@ -520,14 +528,14 @@ def apply_prompt_js(tabname):
         apply(positive, prompt, kind === "snippet", " ");
         apply(negative, negativePrompt, kind === "snippet", ", ");
         {switch_tab}();
-        return [];
+        return [""];
     }}"""
 
 
 def prompt_workspace_ui():
     store = workspace_store()
 
-    with gr.Blocks() as ui:
+    with gr.Blocks() as ui, gr.Column(elem_classes=["prompt-workspace-ui"]):
         gr.Markdown("Browse reusable text snippets and save named prompt versions. Use `<reference>` to insert a snippet and `<<Section>>` to place a section in a prompt.")
         gr.Textbox(
             label="Active library directory",
@@ -541,22 +549,23 @@ def prompt_workspace_ui():
                 value="\n".join(store.section_names()),
                 lines=MAX_SECTIONS,
             )
-            save_sections = gr.Button("Save default sections")
+            save_sections = gr.Button("Save default sections", size="sm", scale=0, min_width=0)
 
-        with gr.Row():
+        with gr.Row(equal_height=False):
             category_filter = gr.Dropdown(label="Category", choices=category_choices(store), value="All categories", elem_id="prompt_workspace_category_filter")
             search = gr.Textbox(label="Search", placeholder="Search names, references, tags, or prompt text", elem_id="prompt_workspace_search")
-        with gr.Row():
-            entries = gr.Dropdown(label="Library", choices=entry_choices(store), value=None, elem_id="prompt_workspace_entries", scale=5)
-            previous_variant = gr.Button("Previous variant", elem_id="prompt_workspace_previous_variant")
-            next_variant = gr.Button("Next variant", elem_id="prompt_workspace_next_variant")
-            new_entry = gr.Button("New")
+        entries = gr.Dropdown(label="Library", choices=entry_choices(store), value=None, elem_id="prompt_workspace_entries")
+        with gr.Row(equal_height=False, elem_classes=["prompt-workspace-actions"]):
+            previous_variant = gr.Button("Previous variant", size="sm", scale=0, min_width=0, elem_id="prompt_workspace_previous_variant")
+            next_variant = gr.Button("Next variant", size="sm", scale=0, min_width=0, elem_id="prompt_workspace_next_variant")
+            new_entry = gr.Button("New", size="sm", scale=0, min_width=0)
 
-        with gr.Row():
-            kind = gr.Radio(choices=["snippet", "prompt"], value="snippet", label="Entry type")
+        kind = gr.Radio(choices=["snippet", "prompt"], value="snippet", label="Entry type")
+        with gr.Row(equal_height=False):
             name = gr.Textbox(label="Name")
             variant_name = gr.Textbox(label="Variant name", value="Default", visible=False)
             category = gr.Textbox(label="Category", value="General")
+        with gr.Row(equal_height=False):
             tags = gr.Textbox(label="Tags", placeholder="Comma-separated")
             reference = gr.Textbox(label="Reference name", placeholder="e.g. character_name", info="Use it elsewhere as <name>")
             snippet_section = gr.Dropdown(label="Default section", choices=["", *store.section_names()], value="")
@@ -564,11 +573,12 @@ def prompt_workspace_ui():
         section_select = gr.CheckboxGroup(label="Sections in the template", choices=store.section_names(), value=[], visible=False)
         with gr.Column(visible=False) as sections_column:
             section_boxes = [gr.Textbox(label=f"Section {index + 1}", lines=2, visible=False) for index in range(MAX_SECTIONS)]
-            with gr.Row():
+            with gr.Row(equal_height=False):
                 snippet_picker = gr.Dropdown(label="Insert snippet", choices=snippet_choices(store), value=None, scale=3)
                 snippet_target = gr.Dropdown(label="Into section", choices=store.section_names(), value=None, scale=2)
-                insert = gr.Button("Insert")
-                use_defaults = gr.Button("Add default sections")
+            with gr.Row(equal_height=False, elem_classes=["prompt-workspace-actions"]):
+                insert = gr.Button("Insert", size="sm", scale=0, min_width=0)
+                use_defaults = gr.Button("Add default sections", size="sm", scale=0, min_width=0)
         section_names = gr.Textbox(value=json.dumps(store.section_names()), visible=False)
 
         source = gr.Textbox(label="Text / template", lines=5, elem_id="prompt_workspace_source", elem_classes=["prompt"])
@@ -576,12 +586,12 @@ def prompt_workspace_ui():
         problem = gr.Markdown()
         negative_prompt = gr.Textbox(label="Negative prompt", lines=3, elem_classes=["prompt"])
 
-        with gr.Row():
-            save = gr.Button("Save", variant="primary")
-            save_as_variant = gr.Button("Save as new variant", visible=False)
-            delete = gr.Button("Delete")
-            apply_txt2img = gr.Button("Apply to txt2img")
-            apply_img2img = gr.Button("Apply to img2img")
+        with gr.Row(equal_height=False, elem_classes=["prompt-workspace-actions"]):
+            save = gr.Button("Save", variant="primary", size="sm", scale=0, min_width=0)
+            save_as_variant = gr.Button("Save as new variant", size="sm", scale=0, min_width=0, visible=False)
+            delete = gr.Button("Delete selected entry", size="sm", scale=0, min_width=0)
+            apply_txt2img = gr.Button("Apply to txt2img", size="sm", scale=0, min_width=0)
+            apply_img2img = gr.Button("Apply to img2img", size="sm", scale=0, min_width=0)
         status = gr.Markdown()
 
         editor_outputs = [
@@ -605,10 +615,10 @@ def prompt_workspace_ui():
         ]
         preview_inputs = [kind, source, section_names, *section_boxes]
 
-        entries.change(fn=partial(load_entry, store), inputs=entries, outputs=editor_outputs, show_progress=False)
+        entries.input(fn=partial(load_entry, store), inputs=entries, outputs=editor_outputs, show_progress=False)
         filter_outputs = [entries, *editor_outputs, status]
         filter_inputs = [category_filter, search, entries]
-        category_filter.change(fn=partial(refresh_entries, store), inputs=filter_inputs, outputs=filter_outputs, show_progress=False)
+        category_filter.input(fn=partial(refresh_entries, store), inputs=filter_inputs, outputs=filter_outputs, show_progress=False)
         search.change(fn=partial(refresh_entries, store), inputs=filter_inputs, outputs=filter_outputs, show_progress=False)
 
         kind.input(
@@ -648,24 +658,24 @@ def prompt_workspace_ui():
             show_progress=False,
         )
 
-        save_outputs = [entries, category_filter, search, snippet_picker, status]
+        save_inputs = [entries, category_filter, search, kind, name, variant_name, category, tags, reference, snippet_section, source, negative_prompt, section_names, *section_boxes]
+        save_outputs = [entries, category_filter, snippet_picker, status]
         save.click(
             fn=partial(save_entry, store),
-            inputs=[entries, kind, name, variant_name, category, tags, reference, snippet_section, source, negative_prompt, section_names, *section_boxes],
+            inputs=save_inputs,
             outputs=save_outputs,
             show_progress=False,
         )
         save_as_variant.click(
-            fn=partial(save_variant, store),
-            inputs=[entries, variant_name, source, negative_prompt, section_names, *section_boxes],
+            fn=partial(save_entry, store, new_variant=True),
+            inputs=save_inputs,
             outputs=save_outputs,
             show_progress=False,
         )
         delete.click(
             fn=partial(delete_entry, store),
-            _js='function(id, category, search){return confirm("Delete this library entry?") ? [id, category, search] : [null, category, search];}',
             inputs=[entries, category_filter, search],
-            outputs=[entries, category_filter, *editor_outputs, snippet_picker, status],
+            outputs=[entries, category_filter, snippet_picker, status],
             show_progress=False,
         )
 
@@ -678,8 +688,8 @@ def prompt_workspace_ui():
             ).then(fn=partial(load_entry, store), inputs=entries, outputs=editor_outputs, show_progress=False)
 
         apply_inputs = [kind, result, negative_prompt]
-        apply_txt2img.click(fn=None, _js=apply_prompt_js("txt2img"), inputs=apply_inputs, show_progress=False)
-        apply_img2img.click(fn=None, _js=apply_prompt_js("img2img"), inputs=apply_inputs, show_progress=False)
+        apply_txt2img.click(fn=None, _js=apply_prompt_js("txt2img"), inputs=apply_inputs, outputs=status, show_progress=False)
+        apply_img2img.click(fn=None, _js=apply_prompt_js("img2img"), inputs=apply_inputs, outputs=status, show_progress=False)
 
     return ui
 

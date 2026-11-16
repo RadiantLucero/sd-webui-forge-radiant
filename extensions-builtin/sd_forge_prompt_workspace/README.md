@@ -11,6 +11,33 @@ snippets and named prompt versions in a browsable library.
 - Line breaks and repeated spaces in saved and applied prompts are reduced to
   single spaces, because Forge passes them to the text encoder unchanged.
 
+Workspace and storyboard controls use compact, text-width buttons and separate
+field rows from action bars. The library browser and gallery assignment panel
+use the same layout; controls wrap on narrower screens. These styles apply only
+to this extension.
+
+## Saving library entries
+
+**Save** uses the category and name to find an entry. For prompts, the variant
+name also identifies the version. An existing match is updated immediately;
+otherwise a new entry or variant is created. The editor contents and current
+library selection stay in place, so **New** is only needed to clear the editor.
+Names and categories are matched exactly, ignoring surrounding whitespace;
+variant names are matched case-insensitively. A snippet and a prompt cannot
+share a name in the same category.
+
+**Save as new variant** requires an existing prompt with the entered category
+and name and refuses to replace an existing variant. Older libraries may
+contain ambiguous duplicate names or prompt groups. Such conflicts are reported
+without changing the library and must be resolved before saving that name.
+
+**Delete selected entry** deletes the entry selected in **Library**, not
+necessarily the one shown in the editor after a save. Saving under a different
+name or category leaves the original selected for deletion. Reference names
+remain globally unique, so copying a snippet with its existing reference is not
+possible. Deleting a referenced snippet is blocked if another library entry
+uses it; references in generation fields and storyboard drafts are not checked.
+
 ## Using the library while generating
 
 Open **Prompt Workspace** under the prompt fields in txt2img or img2img.
@@ -22,8 +49,9 @@ Snippets without a reference name always insert their text. Any negative text
 from the snippet is appended to the negative prompt.
 
 Selecting a saved prompt shows its preview; **Replace with selected prompt**
-replaces both prompt fields after confirmation. Use the refresh icon after
-creating or changing entries in the workspace.
+immediately replaces both prompt fields. Use the refresh icon after creating
+or changing entries in the workspace. Deleting a library entry also takes
+effect immediately.
 
 ## Prompt templates and sections
 
@@ -92,10 +120,10 @@ asset; the interface shows it so it can be added to the scene's negative prompt.
 
 Save a draft as a named variant to preserve its structure, asset definitions,
 library reference texts and resolved positive and negative prompts. Selecting
-another variant replaces the current draft after confirmation. A loaded variant
-keeps its saved definitions while editing; **Use current library and project
-assets** explicitly refreshes them. Applying a selected variant to txt2img or
-img2img replaces the prompt fields after confirmation.
+another variant immediately replaces the current draft, so save it first if you
+want to keep it. A loaded variant keeps its saved definitions while editing;
+**Use current library and project assets** explicitly refreshes them. Applying
+a selected variant to txt2img or img2img immediately replaces the prompt fields.
 
 After generating, open **Assign image to storyboard** below the output gallery,
 select the storyboard and scene, and use the selected gallery image. The
@@ -112,7 +140,8 @@ while writing, the new directory may contain incomplete files.
 Storyboard project files are stored separately under `storyboards/` in the
 active Prompt Workspace library directory. Each project records its image
 directory separately. Changing either directory does not move existing data.
-Deleting a storyboard, scene or variant does not delete its image files.
+Deleting a storyboard, scene or variant takes effect immediately and does not
+delete its image files.
 
 ## Storage location
 
