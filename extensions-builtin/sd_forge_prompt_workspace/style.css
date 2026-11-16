@@ -1,8 +1,9 @@
 .prompt-workspace-ui .gradio-button:not(.tool) {
+    flex: 0 0 auto;
     width: fit-content;
     max-width: 100%;
     white-space: normal;
-    overflow-wrap: anywhere;
+    overflow-wrap: break-word;
 }
 
 .prompt-workspace-ui .gradio-row {

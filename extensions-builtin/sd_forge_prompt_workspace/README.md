@@ -13,8 +13,8 @@ snippets and named prompt versions in a browsable library.
 
 Workspace and storyboard controls use compact, text-width buttons and separate
 field rows from action bars. The library browser and gallery assignment panel
-use the same layout; controls wrap on narrower screens. These styles apply only
-to this extension.
+use the same layout; whole buttons wrap onto another row on narrower screens
+instead of being squeezed. These styles apply only to this extension.
 
 ## Saving library entries
 
