@@ -15,6 +15,8 @@ Workspace and storyboard controls use compact, text-width buttons and separate
 field rows from action bars. The library browser and gallery assignment panel
 use the same layout; whole buttons wrap onto another row on narrower screens
 instead of being squeezed. These styles apply only to this extension.
+Field rows align the bottoms of inputs even when labels or hints differ in
+height.
 
 ## Saving library entries
 

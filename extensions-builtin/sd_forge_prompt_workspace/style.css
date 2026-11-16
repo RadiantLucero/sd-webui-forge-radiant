@@ -6,8 +6,10 @@
     overflow-wrap: break-word;
 }
 
-.prompt-workspace-ui .gradio-row {
-    align-items: flex-start;
+/* Gradio wraps adjacent fields in another flex container. */
+.prompt-workspace-ui .gradio-row,
+.prompt-workspace-ui .gradio-row > .form {
+    align-items: flex-end;
 }
 
 .prompt-workspace-ui .gradio-row.prompt-workspace-actions {
