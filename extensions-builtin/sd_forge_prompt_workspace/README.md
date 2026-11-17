@@ -113,14 +113,23 @@ prompt field.
 ## Storyboards
 
 The **Storyboard** tab manages projects, ordered scenes, project characters,
-locations and objects. Create a storyboard with a directory for its images,
-then add scenes. The scene editor uses the library's current default section
+locations and objects. Select the storyboard at the top, then work through the
+steps: **1 · Storyboard** creates it and sets its image directory, **2 · Assets**
+defines its characters, locations and objects, and **3 · Scenes** adds scenes.
+Within a scene, **a · Cast** chooses its assets and **b · Prompt & image** edits
+the draft, variants and image. The scene editor uses the library's current default section
 names when a scene is created. Its template can include section placeholders
 and free text between them. Changes to a scene's draft are saved as you edit.
 
 Add a project asset with a base description and, for characters, named outfits.
+Asset names are unique within a storyboard, and outfit names within a
+character (ignoring case). **Save asset** updates the asset with the entered
+name or creates it; if an outfit name and description are filled in for a
+character, that outfit is saved as well. **Save outfit** saves only the outfit.
+Deleting an asset removes it from scene drafts; saved variants keep their copy.
 Descriptions may use library references; the library selector can insert
-snippets into them. Select an asset and outfit and add them to a scene.
+snippets into them. In **a · Cast**, select an asset and outfit and add them to
+the scene.
 Character and object descriptions are placed in the Subject section, and
 locations in Environment. Character names precede their descriptions and
 outfits, and selected assets are separated with semicolons. If those section

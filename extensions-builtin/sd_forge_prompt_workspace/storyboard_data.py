@@ -175,42 +175,62 @@ class StoryboardStore:
                 raise ValueError("Invalid draft field")
             self._write(project)
 
-    def add_asset(self, project_id, kind, name, text):
+    @staticmethod
+    def _named(items, name, preferred_id=None):
+        matches = [item for item in items if item["name"].casefold() == name.casefold()]
+        return next((item for item in matches if item["id"] == preferred_id), matches[0] if matches else None)
+
+    @classmethod
+    def _upsert_outfit(cls, asset, name, text):
+        if asset["kind"] != "Character":
+            raise ValueError("Only characters can have outfits")
+        name = required_text(name, "Outfit name")
+        text = required_text(text, "Outfit text")
+        outfit = cls._named(asset["outfits"], name)
+        if outfit is None:
+            outfit = {"id": new_id(), "name": name, "text": text}
+            asset["outfits"].append(outfit)
+        else:
+            outfit["name"], outfit["text"] = name, text
+        return outfit
+
+    def save_asset(self, project_id, selected_id, kind, name, text, outfit_name="", outfit_text=""):
         if kind not in ("Character", "Location", "Object"):
             raise ValueError("Invalid asset type")
+        name = required_text(name, "Asset name")
+        text = required_text(text, "Asset text")
         with _lock:
             project = self.load(project_id)
-            asset = {"id": new_id(), "kind": kind, "name": required_text(name, "Asset name"), "text": required_text(text, "Asset text"), "outfits": []}
-            project["assets"].append(asset)
+            asset = self._named(project["assets"], name, selected_id)
+            if asset is None:
+                asset = {"id": new_id(), "kind": kind, "name": name, "text": text, "outfits": []}
+                project["assets"].append(asset)
+            elif asset["kind"] != kind:
+                raise ValueError(f"An asset named '{asset['name']}' already exists as {asset['kind']}")
+            else:
+                asset["name"], asset["text"] = name, text
+            outfit = None
+            if (outfit_name or "").strip() or (outfit_text or "").strip():
+                outfit = self._upsert_outfit(asset, outfit_name, outfit_text)
             self._write(project)
-            return asset
+            return asset, outfit
 
-    def add_outfit(self, project_id, asset_id, name, text):
+    def save_outfit(self, project_id, asset_id, name, text):
         with _lock:
             project = self.load(project_id)
-            asset = self._find(project["assets"], asset_id, "Character")
-            if asset["kind"] != "Character":
-                raise ValueError("Only characters can have outfits")
-            outfit = {"id": new_id(), "name": required_text(name, "Outfit name"), "text": required_text(text, "Outfit text")}
-            asset["outfits"].append(outfit)
+            outfit = self._upsert_outfit(self._find(project["assets"], asset_id, "Character"), name, text)
             self._write(project)
             return outfit
 
-    def update_asset(self, project_id, asset_id, name, text):
+    def delete_asset(self, project_id, asset_id):
         with _lock:
             project = self.load(project_id)
-            asset = self._find(project["assets"], asset_id, "Asset")
-            asset["name"] = required_text(name, "Asset name")
-            asset["text"] = required_text(text, "Asset text")
-            self._write(project)
-
-    def update_outfit(self, project_id, asset_id, outfit_id, name, text):
-        with _lock:
-            project = self.load(project_id)
-            asset = self._find(project["assets"], asset_id, "Character")
-            outfit = self._find(asset["outfits"], outfit_id, "Outfit")
-            outfit["name"] = required_text(name, "Outfit name")
-            outfit["text"] = required_text(text, "Outfit text")
+            self._find(project["assets"], asset_id, "Asset")
+            project["assets"] = [item for item in project["assets"] if item["id"] != asset_id]
+            for scene in project["scenes"]:
+                scene_draft = scene["draft"]
+                if scene_draft["context"] is None:
+                    scene_draft["selections"] = [item for item in scene_draft["selections"] if item["asset_id"] != asset_id]
             self._write(project)
 
     def select_asset(self, project_id, scene_id, asset_id, outfit_id):

@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, Mock, patch
 
+import gradio as gr
 from PIL import Image
 
 EXTENSION_DIR = Path(__file__).resolve().parents[1] / "extensions-builtin" / "sd_forge_prompt_workspace"
@@ -14,6 +15,9 @@ sys.path.insert(0, str(EXTENSION_DIR))
 from prompt_workspace_data import MAX_SECTIONS, PromptWorkspaceStore
 from storyboard_data import StoryboardStore
 from storyboard_ui import (
+    add_selection,
+    cast_values,
+    delete_asset,
     delete_project,
     delete_scene,
     delete_variant,
@@ -97,8 +101,7 @@ class StoryboardTests(unittest.TestCase):
 
     def test_scenes_reuse_characters_outfits_and_freeze_variants(self):
         snippet = self.snippet(None, "red hair")
-        character = self.store.add_asset(self.pid, "Character", "Mara", "<character>")
-        outfit = self.store.add_outfit(self.pid, character["id"], "Coat", "blue coat")
+        character, outfit = self.store.save_asset(self.pid, None, "Character", "Mara", "<character>", "Coat", "blue coat")
         self.store.select_asset(self.pid, self.sid, character["id"], outfit["id"])
         self.library.save_entry(
             None, kind="snippet", name="Unrelated", category="Other", tags=[],
@@ -111,7 +114,7 @@ class StoryboardTests(unittest.TestCase):
         self.assertIn("walking", variant["prompt"])
 
         self.snippet(snippet.id, "dark hair")
-        self.store.update_asset(self.pid, character["id"], "Mara", "new <character>")
+        self.store.save_asset(self.pid, character["id"], "Character", "Mara", "new <character>")
         project = self.store.load(self.pid)
         scene = project["scenes"][0]
         self.assertEqual(variant["prompt"], scene["variants"][0]["prompt"])
@@ -231,11 +234,47 @@ class StoryboardTests(unittest.TestCase):
         self.assertEqual("Variant deleted", result[-1])
         self.assertEqual([first["id"]], [variant["id"] for variant in self.store.load(self.pid)["scenes"][0]["variants"]])
 
+    def test_saving_assets_by_name_updates_them_with_outfits(self):
+        first, _ = self.store.save_asset(self.pid, None, "Character", "Mara", "red hair")
+        again, outfit = self.store.save_asset(self.pid, None, "Character", "mara", "dark hair", "Coat", "blue coat")
+        self.assertEqual(first["id"], again["id"])
+        same, _ = self.store.save_asset(self.pid, first["id"], "Character", "Mara", "dark hair", "coat", "red coat")
+        assets = self.store.load(self.pid)["assets"]
+        self.assertEqual(1, len(assets))
+        self.assertEqual("dark hair", assets[0]["text"])
+        self.assertEqual([(outfit["id"], "coat", "red coat")], [(item["id"], item["name"], item["text"]) for item in assets[0]["outfits"]])
+        with self.assertRaisesRegex(ValueError, "already exists as Character"):
+            self.store.save_asset(self.pid, None, "Object", "Mara", "a statue")
+        with self.assertRaisesRegex(ValueError, "Only characters"):
+            self.store.save_asset(self.pid, None, "Object", "Lamp", "a lamp", "Coat", "blue coat")
+        self.assertEqual(1, len(self.store.load(self.pid)["assets"]))
+
+    def test_scene_asset_actions_show_selection_and_deletion_updates_drafts(self):
+        character, outfit = self.store.save_asset(self.pid, None, "Character", "Mara", "red hair", "Coat", "blue coat")
+        selection, message = add_selection(self.store, self.pid, self.sid, character["id"], outfit["id"])
+        self.assertEqual(([("Mara / Coat", character["id"])], character["id"]), (selection["choices"], selection["value"]))
+        self.assertEqual("Added to scene", message)
+        self.assertEqual((gr.skip(), "Select a scene and a project asset first"), add_selection(self.store, self.pid, None, character["id"], None))
+
+        self.store.select_variant(self.pid, self.sid, self.store.save_variant(self.pid, self.sid, "Frozen")["id"])
+        other = self.store.add_scene(self.pid, "Other")
+        self.store.select_asset(self.pid, other["id"], character["id"], None)
+        result = delete_asset(self.store, self.pid, other["id"], character["id"])
+        self.assertEqual(([], [], "Asset deleted"), (result[0]["choices"], result[2]["choices"], result[3]))
+        project = self.store.load(self.pid)
+        frozen, other_scene = project["scenes"]
+        self.assertEqual([], other_scene["draft"]["selections"])
+        self.assertIn("Mara: red hair, blue coat", self.store.resolve(project, frozen["draft"])[0])
+        lamp, _ = self.store.save_asset(self.pid, None, "Object", "Lamp", "a lamp")
+        assets, outfits = cast_values(self.store, self.pid, character["id"], outfit["id"])
+        self.assertEqual(([("Object: Lamp", lamp["id"])], None, None), (assets["choices"], assets["value"], outfits["value"]))
+        self.assertEqual(lamp["id"], cast_values(self.store, self.pid, lamp["id"], None)[0]["value"])
+
     def test_new_scenes_use_configured_section_names(self):
         self.library.save_section_names(["Character", "Place"])
         scene = self.store.add_scene(self.pid, "Custom")
         self.assertEqual(["Character", "Place"], [section["name"] for section in scene["draft"]["sections"]])
-        location = self.store.add_asset(self.pid, "Location", "Station", "a station")
+        location, _ = self.store.save_asset(self.pid, None, "Location", "Station", "a station")
         self.store.select_asset(self.pid, scene["id"], location["id"], None)
         project = self.store.load(self.pid)
         selected = next(item for item in project["scenes"] if item["id"] == scene["id"])
