@@ -279,12 +279,10 @@ def delete_variant(store, project_id, scene_id, variant_id):
     return gr.update(choices=variant_choices(scene), value=None), "", "", None, "Variant deleted"
 
 
-def variant_prompt(store, project_id, scene_id, variant_id):
-    _, scene = get_scene(store, project_id, scene_id)
-    if scene["selected_variant"] != variant_id:
-        raise ValueError("Load and select this variant before applying it")
-    variant = store._find(scene["variants"], variant_id, "Variant")
-    return "prompt", variant["prompt"], variant["negative"]
+def draft_prompt(store, project_id, scene_id):
+    if not project_id or not scene_id:
+        raise gr.Error("Select a storyboard and scene before sending the draft")
+    return "prompt", *preview_draft(store, project_id, scene_id)
 
 
 def preview_draft(store, project_id, scene_id):
@@ -385,8 +383,8 @@ def storyboard_ui(library, apply_js):
                                 prompt = gr.Textbox(label="Resolved prompt", lines=4, interactive=False)
                                 negative_result = gr.Textbox(label="Resolved negative prompt", lines=2, interactive=False, elem_classes=["prompt-workspace-negative"])
                                 with gr.Row(equal_height=False, elem_classes=["prompt-workspace-actions"]):
-                                    apply_txt = gr.Button("Apply selected variant to txt2img", size="sm", scale=0, min_width=0)
-                                    apply_img = gr.Button("Apply selected variant to img2img", size="sm", scale=0, min_width=0)
+                                    apply_txt = gr.Button("Send draft to txt2img", size="sm", scale=0, min_width=0)
+                                    apply_img = gr.Button("Send draft to img2img", size="sm", scale=0, min_width=0)
                                     refresh_scene = gr.Button("Refresh scene", size="sm", scale=0, min_width=0)
                                 status = gr.Markdown()
                             with gr.Column():
@@ -467,7 +465,7 @@ def storyboard_ui(library, apply_js):
         )
         for button, tab in ((apply_txt, "txt2img"), (apply_img, "img2img")):
             button.click(
-                partial(variant_prompt, store), [project, scene, variant],
+                partial(draft_prompt, store), [project, scene],
                 [kind, selected_prompt, selected_negative], **common,
             ).success(
                 fn=None,

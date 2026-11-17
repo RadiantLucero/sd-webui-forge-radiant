@@ -151,8 +151,11 @@ Save a draft as a named variant to preserve its structure, asset definitions,
 library reference texts and resolved positive and negative prompts. Selecting
 another variant immediately replaces the current draft, so save it first if you
 want to keep it. A loaded variant keeps its saved definitions while editing;
-**Use current library and project assets** explicitly refreshes them. Applying
-a selected variant to txt2img or img2img immediately replaces the prompt fields.
+**Use current library and project assets** explicitly refreshes them.
+**Send draft to txt2img/img2img** resolves the current draft, including edits
+made after loading or saving a variant, and immediately replaces the target
+prompt fields. A saved variant is not required, and sending the draft does not
+change saved variants.
 
 After generating, open **Assign image to storyboard** below the output gallery,
 select the storyboard and scene, and use the selected gallery image. The

@@ -24,6 +24,7 @@ from storyboard_ui import (
     delete_project,
     delete_scene,
     delete_variant,
+    draft_prompt,
     gallery_callback,
     load_variant,
     prompt_step_values,
@@ -420,6 +421,35 @@ class StoryboardTests(unittest.TestCase):
         result = delete_variant(self.store, self.pid, self.sid, second["id"])
         self.assertEqual("Variant deleted", result[-1])
         self.assertEqual([first["id"]], [variant["id"] for variant in self.store.load(self.pid)["scenes"][0]["variants"]])
+
+    def test_sending_draft_includes_custom_section_edits_without_changing_variant(self):
+        self.library.save_section_names(["Subject", "Lora"])
+        sid = self.store.add_scene(self.pid, "Custom")["id"]
+        self.store.update_draft(self.pid, sid, "section", "a landscape", 0)
+        variant = self.store.save_variant(self.pid, sid, "Before Lora")
+        self.store.select_variant(self.pid, sid, variant["id"])
+        self.store.update_draft(self.pid, sid, "section", "<lora:example:0.8>", 1)
+        self.store.update_draft(self.pid, sid, "negative", "blurry")
+
+        self.assertEqual(
+            ("prompt", "a landscape <lora:example:0.8>", "blurry"),
+            draft_prompt(self.store, self.pid, sid),
+        )
+        scene = self.store._find(self.store.load(self.pid)["scenes"], sid, "Scene")
+        self.assertEqual(variant, scene["variants"][0])
+
+    def test_sending_draft_does_not_require_a_saved_variant(self):
+        self.store.update_draft(self.pid, self.sid, "section", "a landscape", 0)
+        self.assertEqual(("prompt", "a landscape", ""), draft_prompt(self.store, self.pid, self.sid))
+        scene = self.store.load(self.pid)["scenes"][0]
+        self.assertEqual([], scene["variants"])
+        self.assertIsNone(scene["selected_variant"])
+
+    def test_sending_draft_reports_missing_project_or_scene(self):
+        for project_id, scene_id in ((None, None), (self.pid, None), (None, self.sid)):
+            with self.subTest(project_id=project_id, scene_id=scene_id):
+                with self.assertRaisesRegex(gr.Error, "Select a storyboard and scene"):
+                    draft_prompt(self.store, project_id, scene_id)
 
     def test_saving_assets_by_name_updates_them_with_outfits(self):
         first, _ = self.store.save_asset(self.pid, None, "Character", "Mara", "red hair")
