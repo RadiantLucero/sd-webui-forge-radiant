@@ -178,8 +178,19 @@ def update_kind(store, kind, source, names_json, *texts):
     )
 
 
-def update_source(store, kind, source, names_json, *texts):
-    return gr.update(value=used_section_names(source, json.loads(names_json))), *preview_values(store, kind, source, names_json, *texts)
+def skip_unchanged(new, current):
+    return gr.skip() if new == current else new
+
+
+def changed_preview_values(store, current_result, current_problem, kind, source, names_json, *texts):
+    result, problem = preview_values(store, kind, source, names_json, *texts)
+    return skip_unchanged(result, current_result), skip_unchanged(problem, current_problem)
+
+
+def update_source(store, current_sections, current_result, current_problem, kind, source, names_json, *texts):
+    used = used_section_names(source, json.loads(names_json))
+    sections = gr.skip() if used == (current_sections or []) else gr.update(value=used)
+    return sections, *changed_preview_values(store, current_result, current_problem, kind, source, names_json, *texts)
 
 
 def apply_default_sections(store, names_json, *texts):
@@ -244,16 +255,26 @@ def save_entry(store, entry_id, category_filter, search, kind, name, variant_nam
             section=section or "",
             sections=make_sections(names_json, texts) if kind == "prompt" else None,
             new_variant=new_variant,
+            selected_entry_id=entry_id,
         )
     except (ValueError, OSError) as error:
         return gr.skip(), gr.skip(), gr.skip(), f"Could not save: {error}"
 
     try:
         selected = next((item for item in store.load() if item.id == entry_id), None)
-        choices = entry_choices(store, category_filter, search)
+        categories = category_choices(store)
+        if (
+            not new_variant
+            and selected is not None
+            and category_filter not in ("All categories", selected.category)
+            and (selected.id == entry.id or (entry.kind == "prompt" and selected.variant_group == entry.variant_group))
+        ):
+            selected_category = selected.category
+        else:
+            selected_category = category_filter if category_filter in categories else "All categories"
+        choices = entry_choices(store, selected_category, search)
         if selected and all(value != selected.id for _, value in choices):
             choices.append((entry_label(selected), selected.id))
-        categories = category_choices(store)
         snippets = snippet_choices(store)
     except (ValueError, OSError) as error:
         return gr.skip(), gr.skip(), gr.skip(), f"Saved '{entry_label(entry)}', but could not refresh the library: {error}"
@@ -265,7 +286,7 @@ def save_entry(store, entry_id, category_filter, search, kind, name, variant_nam
         status += ". The previous selection no longer exists"
     return (
         gr.update(choices=choices, value=selected.id if selected else None),
-        gr.update(choices=categories),
+        gr.update(choices=categories, value=selected_category),
         gr.update(choices=snippets),
         status,
     )
@@ -585,7 +606,7 @@ def prompt_workspace_ui():
         section_names = gr.Textbox(value=json.dumps(store.section_names()), visible=False)
 
         source = gr.Textbox(label="Text / template", lines=5, elem_id="prompt_workspace_source", elem_classes=["prompt"])
-        result = gr.Textbox(label="Result", lines=3, interactive=False)
+        result = gr.Textbox(label="Result", lines=3, max_lines=3, interactive=False)
         problem = gr.Markdown()
         negative_prompt = gr.Textbox(label="Negative prompt", lines=3, elem_classes=["prompt"])
 
@@ -617,6 +638,7 @@ def prompt_workspace_ui():
             section_names,
         ]
         preview_inputs = [kind, source, section_names, *section_boxes]
+        source_update_inputs = [section_select, result, problem, *preview_inputs]
 
         entries.input(fn=partial(load_entry, store), inputs=entries, outputs=editor_outputs, show_progress=False)
         filter_outputs = [entries, *editor_outputs, status]
@@ -630,9 +652,9 @@ def prompt_workspace_ui():
             outputs=[variant_name, save_as_variant, reference, snippet_section, section_select, sections_column, result, problem],
             show_progress=False,
         )
-        source.change(fn=partial(update_source, store), inputs=preview_inputs, outputs=[section_select, result, problem], show_progress=False)
+        source.change(fn=partial(update_source, store), inputs=source_update_inputs, outputs=[section_select, result, problem], show_progress=False)
         for box in section_boxes:
-            box.input(fn=partial(preview_values, store), inputs=preview_inputs, outputs=[result, problem], show_progress=False)
+            box.input(fn=partial(changed_preview_values, store), inputs=[result, problem, *preview_inputs], outputs=[result, problem], show_progress=False)
         section_select.input(fn=None, _js=TOGGLE_SECTION_JS, inputs=[section_select, source, section_names], outputs=source, show_progress=False)
 
         snippet_picker.input(fn=partial(select_snippet, store), inputs=[section_names, snippet_picker], outputs=snippet_target, show_progress=False)
@@ -647,7 +669,7 @@ def prompt_workspace_ui():
             inputs=[section_names, *section_boxes],
             outputs=[section_select, snippet_target, *section_boxes, section_names, status],
             show_progress=False,
-        ).then(fn=partial(update_source, store), inputs=preview_inputs, outputs=[section_select, result, problem], show_progress=False)
+        ).then(fn=partial(update_source, store), inputs=source_update_inputs, outputs=[section_select, result, problem], show_progress=False)
         save_sections.click(
             fn=partial(save_default_sections, store),
             inputs=default_sections,

@@ -4,7 +4,7 @@ import re
 import tempfile
 import uuid
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from functools import wraps
 from pathlib import Path
 from threading import RLock
@@ -38,7 +38,7 @@ def library_path(extension_dir: Path, configured_directory: str) -> Path:
 
 
 def normalize_prompt_text(text: str) -> str:
-    return " ".join(text.split())
+    return re.sub(r"\s+([,.;:])", r"\1", " ".join(text.split()))
 
 
 @dataclass(frozen=True)
@@ -197,12 +197,31 @@ class PromptWorkspaceStore:
         section: str = "",
         sections: list[dict[str, str]] | None = None,
         new_variant: bool = False,
+        selected_entry_id: str | None = None,
     ) -> PromptEntry:
         entries, section_names = self._read()
         if kind not in ENTRY_KINDS:
             raise ValueError(f"Unsupported prompt entry kind: {kind}")
         name = self._required_text(name, "Name")
         category = self._required_text(category, "Category")
+        selected = next((entry for entry in entries if entry.id == selected_entry_id), None)
+        if selected_entry_id and selected is None:
+            raise ValueError("The selected prompt entry no longer exists")
+        if selected and not new_variant and selected.kind == kind and selected.name == name and selected.category != category:
+            if any(entry.name == name and entry.category == category for entry in entries):
+                raise ValueError(f"The name '{name}' is already used in '{category}'; cannot move the selected entry")
+            if kind == "prompt":
+                moving = [entry for entry in entries if entry.kind == "prompt" and entry.variant_group == selected.variant_group]
+                for entry in moving:
+                    self._ensure_unique(entries, entry)
+            else:
+                moving = [selected]
+                if sum(entry.name == name and entry.category == selected.category for entry in entries) > 1:
+                    raise ValueError(f"Multiple entries named '{name}' exist in '{selected.category}'; resolve them before moving")
+            moving_ids = {entry.id for entry in moving}
+            if sum(entry.id in moving_ids for entry in entries) != len(moving_ids):
+                raise ValueError("Multiple entries share an ID; resolve them before moving")
+            entries = [replace(entry, category=category) if entry.id in moving_ids else entry for entry in entries]
         matches = [entry for entry in entries if entry.name == name and entry.category == category]
         if any(entry.kind != kind for entry in matches):
             raise ValueError(f"The name '{name}' is already used by another entry type in '{category}'")

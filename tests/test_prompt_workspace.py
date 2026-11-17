@@ -14,7 +14,11 @@ from unittest.mock import patch
 EXTENSION_DIR = Path(__file__).resolve().parents[1] / "extensions-builtin" / "sd_forge_prompt_workspace"
 sys.path.insert(0, str(EXTENSION_DIR))
 
-from prompt_workspace_data import PromptWorkspaceStore, library_path
+from prompt_workspace_data import (
+    PromptWorkspaceStore,
+    library_path,
+    normalize_prompt_text,
+)
 from prompt_workspace_generation import install_prompt_resolver
 
 
@@ -67,6 +71,9 @@ class PromptWorkspaceStoreTests(unittest.TestCase):
         self.assertEqual(extension_dir / "data" / "library.json", library_path(extension_dir, ""))
         self.assertEqual(extension_dir / "data" / "library.json", library_path(extension_dir, "  "))
         self.assertEqual(custom_dir / "library.json", library_path(extension_dir, str(custom_dir)))
+
+    def test_prompt_normalization_removes_spaces_before_punctuation(self):
+        self.assertEqual("one, two. three; four: five", normalize_prompt_text("one  ,  two . three ; four : five"))
 
     def test_switching_library_directory_does_not_move_or_replace_libraries(self):
         extension_dir = Path(self.temp_dir.name) / "extension"
@@ -209,6 +216,79 @@ class PromptWorkspaceStoreTests(unittest.TestCase):
             )
         self.assertEqual(3, len(self.store.load()))
 
+    def test_moving_a_selected_prompt_keeps_its_variants_and_is_atomic(self):
+        base = self.store.upsert_entry(
+            kind="prompt", name="Station", category="Scenes", variant_name="Base",
+            tags=[], prompt="a station", negative_prompt="",
+        )
+        fog = self.store.upsert_entry(
+            kind="prompt", name="Station", category="Scenes", variant_name="Fog",
+            tags=[], prompt="a foggy station", negative_prompt="",
+        )
+        before = self.path.read_bytes()
+        with self.assertRaisesRegex(ValueError, "Unknown reference"):
+            self.store.upsert_entry(
+                selected_entry_id=base.id, kind="prompt", name="Station", category="Stories",
+                variant_name="Base", tags=[], prompt="<missing>", negative_prompt="",
+            )
+        self.assertEqual(before, self.path.read_bytes())
+
+        updated = self.store.upsert_entry(
+            selected_entry_id=base.id, kind="prompt", name="Station", category="Stories",
+            variant_name="Base", tags=["updated"], prompt="a new station", negative_prompt="",
+        )
+        variants = {entry.id: entry for entry in self.store.variants(base.id)}
+        self.assertEqual({base.id, fog.id}, set(variants))
+        self.assertEqual({"Stories"}, {entry.category for entry in variants.values()})
+        self.assertEqual(base.variant_group, updated.variant_group)
+        self.assertEqual("a new station", variants[base.id].prompt)
+        self.assertEqual("a foggy station", variants[fog.id].prompt)
+
+        dawn = self.store.upsert_entry(
+            selected_entry_id=base.id, kind="prompt", name="Station", category="Places",
+            variant_name="Dawn", tags=[], prompt="a station at dawn", negative_prompt="",
+        )
+        variants = self.store.variants(base.id)
+        self.assertEqual({base.id, fog.id, dawn.id}, {entry.id for entry in variants})
+        self.assertEqual({"Places"}, {entry.category for entry in variants})
+        self.assertEqual(base.variant_group, dawn.variant_group)
+
+    def test_moving_to_an_existing_name_does_not_overwrite_either_entry(self):
+        for source_kind, target_kind in (("snippet", "snippet"), ("prompt", "prompt"), ("snippet", "prompt")):
+            with self.subTest(source_kind=source_kind, target_kind=target_kind):
+                store = PromptWorkspaceStore(Path(self.temp_dir.name) / f"{source_kind}-{target_kind}" / "library.json")
+                source = store.upsert_entry(
+                    kind=source_kind, name="Shared", category="Original", tags=[],
+                    prompt="original", negative_prompt="",
+                )
+                store.upsert_entry(
+                    kind=target_kind, name="Shared", category="Target", tags=[],
+                    prompt="target", negative_prompt="",
+                )
+                before = store.path.read_bytes()
+                with self.assertRaisesRegex(ValueError, "already used"):
+                    store.upsert_entry(
+                        selected_entry_id=source.id, kind=source_kind, name="Shared", category="Target",
+                        tags=[], prompt="changed", negative_prompt="",
+                    )
+                self.assertEqual(before, store.path.read_bytes())
+
+    def test_save_as_new_variant_does_not_move_the_selected_prompt(self):
+        source = self.store.upsert_entry(
+            kind="prompt", name="Station", category="Scenes", variant_name="Base",
+            tags=[], prompt="a station", negative_prompt="",
+        )
+        target = self.store.upsert_entry(
+            kind="prompt", name="Station", category="Places", variant_name="Base",
+            tags=[], prompt="another station", negative_prompt="",
+        )
+        night = self.store.upsert_entry(
+            selected_entry_id=source.id, kind="prompt", name="Station", category="Places",
+            variant_name="Night", tags=[], prompt="a station at night", negative_prompt="", new_variant=True,
+        )
+        self.assertEqual("Scenes", next(entry for entry in self.store.load() if entry.id == source.id).category)
+        self.assertEqual(target.variant_group, night.variant_group)
+
     def test_overlapping_saves_from_separate_stores_preserve_both_entries(self):
         second_store = PromptWorkspaceStore(self.path)
         first_at_write = Event()
@@ -321,6 +401,22 @@ class PromptWorkspaceStoreTests(unittest.TestCase):
             self.store.upsert_entry(
                 kind="prompt", name="Legacy", category="Weather", variant_name="New",
                 tags=[], prompt="replacement", negative_prompt="",
+            )
+        self.assertEqual(before, self.path.read_bytes())
+        with self.assertRaisesRegex(ValueError, "different names or categories"):
+            self.store.upsert_entry(
+                selected_entry_id=prompt.id, kind="prompt", name="Legacy", category="New category",
+                variant_name="Base", tags=[], prompt="replacement", negative_prompt="",
+            )
+        self.assertEqual(before, self.path.read_bytes())
+
+        duplicate_id = replace(prompt, variant_name="Other")
+        self.store._write([prompt, duplicate_id], self.store.section_names())
+        before = self.path.read_bytes()
+        with self.assertRaisesRegex(ValueError, "share an ID"):
+            self.store.upsert_entry(
+                selected_entry_id=prompt.id, kind="prompt", name="Legacy", category="New category",
+                variant_name="Base", tags=[], prompt="replacement", negative_prompt="",
             )
         self.assertEqual(before, self.path.read_bytes())
 
@@ -730,6 +826,74 @@ class PromptWorkspaceBrowserTests(unittest.TestCase):
                     else:
                         factory.assert_not_called()
                         build.assert_not_called()
+
+    def test_template_edits_only_update_changed_preview_components(self):
+        names = json.dumps(["Subject", "Lighting"])
+        skip = {"__type__": "update"}
+        unchanged = self.browser.update_source(self.store, ["Subject"], "a cat", "", "prompt", "<<Subject>>", names, "a cat", "")
+        self.assertEqual((skip, skip, skip), unchanged)
+
+        changed = self.browser.update_source(self.store, ["Subject"], "a cat", "", "prompt", "<<Subject>> <<Lighting>>", names, "a cat", "soft light")
+        self.assertEqual(({"value": ["Subject", "Lighting"]}, "a cat soft light", skip), changed)
+
+    def test_source_preview_with_added_default_sections(self):
+        updates = self.browser.apply_default_sections(self.store, json.dumps(["Subject"]), "a cat")
+        texts = [update.get("value", "") for update in updates[2:-2]]
+        result = self.browser.update_source(
+            self.store, ["Subject"], "", "⚠️ Unknown section <<Lighting>>",
+            "prompt", "<<Subject>> <<Lighting>>", updates[-2], *texts,
+        )
+        self.assertEqual(({"value": ["Subject", "Lighting"]}, "a cat", ""), result)
+
+    def test_saving_a_changed_category_moves_the_selected_referenced_snippet(self):
+        original = self.store.save_entry(
+            None, kind="snippet", name="Fog", category="Weather", tags=[],
+            prompt="fog", negative_prompt="", reference="fog",
+        )
+        dependent = self.store.save_entry(
+            None, kind="snippet", name="Scene", category="Weather", tags=[],
+            prompt="<fog> clouds", negative_prompt="",
+        )
+        result = self.browser.save_entry(
+            self.store, original.id, "Weather", "", "snippet", "Fog", "", "Lighting",
+            "mood", "fog", "", "thick fog", "", "[]",
+        )
+        moved = next(entry for entry in self.store.load() if entry.id == original.id)
+        self.assertEqual(("Lighting", "fog", "thick fog"), (moved.category, moved.reference, moved.prompt))
+        self.assertEqual(2, len(self.store.load()))
+        self.assertEqual("thick fog clouds", self.store.select_entry(dependent.id)[1])
+        self.assertEqual({"choices": [("Fog <fog> — Lighting", original.id)], "value": original.id}, result[0])
+        self.assertEqual({"choices": ["All categories", "Lighting", "Weather"], "value": "Lighting"}, result[1])
+        self.assertIn("Saved 'Fog <fog> — Lighting'", result[-1])
+
+        before = self.store.path.read_bytes()
+        failed = self.browser.save_entry(
+            self.store, original.id, "Lighting", "", "snippet", "Fog", "", "Atmosphere",
+            "mood", "mist", "", "thick fog", "", "[]",
+        )
+        self.assertIn("<fog> is still used by: Scene", failed[-1])
+        self.assertEqual(before, self.store.path.read_bytes())
+
+    def test_saving_a_changed_category_without_reference_does_not_create_a_copy(self):
+        original = self.store.save_entry(
+            None, kind="snippet", name="Fog", category="Weather", tags=[],
+            prompt="fog", negative_prompt="",
+        )
+        result = self.browser.save_entry(
+            self.store, original.id, "All categories", "", "snippet", "Fog", "", "Lighting",
+            "", "", "", "fog", "", "[]",
+        )
+        self.assertEqual([(original.id, "Lighting")], [(entry.id, entry.category) for entry in self.store.load()])
+        self.assertEqual("All categories", result[1]["value"])
+        self.assertEqual(original.id, result[0]["value"])
+
+    def test_saving_a_missing_selection_does_not_create_an_entry(self):
+        result = self.browser.save_entry(
+            self.store, "deleted", "All categories", "", "snippet", "Fog", "", "Lighting",
+            "", "", "", "fog", "", "[]",
+        )
+        self.assertIn("selected prompt entry no longer exists", result[-1])
+        self.assertFalse(self.store.path.exists())
 
     def test_deleting_without_a_selection_reports_the_problem(self):
         result = self.browser.delete_entry(self.store, None, "All categories", "")

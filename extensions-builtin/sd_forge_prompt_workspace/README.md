@@ -20,13 +20,22 @@ height.
 
 ## Saving library entries
 
-**Save** uses the category and name to find an entry. For prompts, the variant
-name also identifies the version. An existing match is updated immediately;
-otherwise a new entry or variant is created. The editor contents and current
-library selection stay in place, so **New** is only needed to clear the editor.
+**Save** normally uses the category and name to find an entry. For prompts,
+the variant name also identifies the version. An existing match is updated
+immediately; otherwise a new entry or variant is created, except for category
+moves described below. The editor contents and current library selection stay
+in place; **New** clears both.
 Names and categories are matched exactly, ignoring surrounding whitespace;
 variant names are matched case-insensitively. A snippet and a prompt cannot
 share a name in the same category.
+
+When a selected entry keeps its name and type but its category changes,
+**Save** moves it to the new category. For prompts, all variants move together;
+the editor's variant is saved as usual. References remain unchanged unless
+edited. If the destination already contains the same name, the move is
+rejected without overwriting either entry. To create a separate entry with the
+same name in another category, use **New** first; this clears the editor and
+selection.
 
 **Save as new variant** requires an existing prompt with the entered category
 and name and refuses to replace an existing variant. Older libraries may
@@ -35,7 +44,7 @@ without changing the library and must be resolved before saving that name.
 
 **Delete selected entry** deletes the entry selected in **Library**, not
 necessarily the one shown in the editor after a save. Saving under a different
-name or category leaves the original selected for deletion. Reference names
+name or entry type leaves the original selected for deletion. Reference names
 remain globally unique, so copying a snippet with its existing reference is not
 possible. Deleting a referenced snippet is blocked if another library entry
 uses it; references in generation fields and storyboard drafts are not checked.
