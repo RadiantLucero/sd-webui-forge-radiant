@@ -15,3 +15,27 @@
 .prompt-workspace-ui .gradio-row.prompt-workspace-actions {
     align-items: center;
 }
+
+.storyboard-asset-chips {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5em;
+}
+
+.storyboard-asset-chip {
+    padding: 0.4em 0.7em;
+    border: 1px solid var(--border-color-primary);
+    border-radius: var(--button-small-radius);
+    background: var(--button-secondary-background-fill);
+    color: var(--button-secondary-text-color);
+    cursor: grab;
+    user-select: none;
+}
+
+.storyboard-asset-chip:focus-visible {
+    outline: 2px solid var(--color-accent);
+}
+
+.prompt-workspace-negative-hidden {
+    display: none !important;
+}

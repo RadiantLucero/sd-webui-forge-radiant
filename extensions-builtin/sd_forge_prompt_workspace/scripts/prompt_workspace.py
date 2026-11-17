@@ -56,6 +56,15 @@ def on_ui_settings():
             category_id="ui",
         ).info("Leave empty to use the extension's data directory. Changing this does not move existing data.").needs_reload_ui(),
     )
+    shared.opts.add_option(
+        "prompt_workspace_show_negative_prompts",
+        shared.OptionInfo(
+            False,
+            "Show negative prompt fields",
+            section=("prompt_workspace", "Prompt Workspace"),
+            category_id="ui",
+        ).info("Show negative prompts in Prompt Workspace, Storyboard, txt2img, img2img and Hires. fix. Hidden values are preserved and still applied."),
+    )
 
 
 def entry_label(entry: PromptEntry) -> str:
@@ -364,7 +373,7 @@ def select_quick_entry(store, index, entries_json, as_reference):
         raise ValueError("The library page has changed; refresh it and select the entry again")
     entry, prompt, negative = store.select_entry(entry_ids[index], as_reference=as_reference)
     preview = entry.prompt if entry.kind == "snippet" and as_reference and entry.reference else prompt
-    if negative:
+    if negative and getattr(getattr(shared, "opts", None), "prompt_workspace_show_negative_prompts", False):
         preview += f"\n\nNegative prompt: {negative}"
     return entry.kind, prompt, negative, preview, entry.id, gr.update(interactive=entry.kind == "prompt")
 
@@ -608,7 +617,7 @@ def prompt_workspace_ui():
         source = gr.Textbox(label="Text / template", lines=5, elem_id="prompt_workspace_source", elem_classes=["prompt"])
         result = gr.Textbox(label="Result", lines=3, max_lines=3, interactive=False)
         problem = gr.Markdown()
-        negative_prompt = gr.Textbox(label="Negative prompt", lines=3, elem_classes=["prompt"])
+        negative_prompt = gr.Textbox(label="Negative prompt", lines=3, elem_classes=["prompt", "prompt-workspace-negative"])
 
         with gr.Row(equal_height=False, elem_classes=["prompt-workspace-actions"]):
             save = gr.Button("Save", variant="primary", size="sm", scale=0, min_width=0)

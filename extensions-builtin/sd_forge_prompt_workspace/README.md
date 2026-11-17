@@ -117,8 +117,8 @@ locations and objects. Select the storyboard at the top, then work through the
 steps: **1 · Storyboard** creates it and sets its image directory, **2 · Assets**
 defines its characters, locations and objects, and **3 · Scenes** adds scenes.
 Within a scene, **a · Cast** chooses its assets and **b · Prompt & image** edits
-the draft, variants and image. The scene editor uses the library's current default section
-names when a scene is created. Its template can include section placeholders
+the draft, variants and image. The scene editor uses the library's current
+default section names when a scene is created. Its template can include section placeholders
 and free text between them. Changes to a scene's draft are saved as you edit.
 
 Add a project asset with a base description and, for characters, named outfits.
@@ -129,14 +129,23 @@ character, that outfit is saved as well. **Save outfit** saves only the outfit.
 Deleting an asset removes it from scene drafts; saved variants keep their copy.
 Descriptions may use library references; the library selector can insert
 snippets into them. In **a · Cast**, select an asset and outfit and add them to
-the scene.
-Character and object descriptions are placed in the Subject section, and
-locations in Environment. Character names precede their descriptions and
-outfits, and selected assets are separated with semicolons. If those section
-names are not present, the first and third
-configured sections are used instead (or the last section if there are fewer).
+the scene. In **b · Prompt & image**, its assets appear as draggable buttons.
+Drag one to the desired text position in any section or directly in the
+template. Alternatively, click a text position and then the asset button.
+This inserts a reference such as `<asset:Old Mill>`, not a copy of the
+description; references can also be typed and ignore case and surrounding
+spaces. Asset names cannot contain `<` or `>`. The reference expands to the
+asset description and selected outfit when previewing or saving a variant.
+If an asset is replaced under a new name, update its references manually. Characters include their name before the
+description. The same asset can be referenced at several positions.
+
+New scenes only include assets where you place their references. Older scenes
+retain automatic Subject/Environment placement until you manually place each
+asset; it is then no longer added automatically, even if you remove its token.
+Removing an asset from a scene also removes its references from that draft.
+Saved variants retain their own text and definitions.
 Snippet negative text is not automatically included when inserting into an
-asset; the interface shows it so it can be added to the scene's negative prompt.
+asset; copy it from the library if needed.
 
 Save a draft as a named variant to preserve its structure, asset definitions,
 library reference texts and resolved positive and negative prompts. Selecting
@@ -163,6 +172,14 @@ active Prompt Workspace library directory. Each project records its image
 directory separately. Changing either directory does not move existing data.
 Deleting a storyboard, scene or variant takes effect immediately and does not
 delete its image files.
+
+## Negative prompt visibility
+
+Negative prompt fields are hidden by default. Enable **Settings > Prompt
+Workspace > Show negative prompt fields** to show them in the library,
+storyboard, txt2img, img2img, Hires. fix and style editors. This setting only
+changes visibility: existing negative prompts are preserved and still applied.
+It does not change CFG or model behavior.
 
 ## Storage location
 

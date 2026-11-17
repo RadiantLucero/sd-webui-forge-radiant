@@ -1002,6 +1002,17 @@ class PromptWorkspaceBrowserTests(unittest.TestCase):
         self.assertEqual(("All categories", 0, 1, 23), (selected, page, last_page, total))
         self.assertEqual(20, len(choices))
 
+    def test_hidden_negative_prompt_is_preserved_but_omitted_from_quick_preview(self):
+        snippet = self.store.save_entry(
+            None, kind="snippet", name="Clouds", category="Weather", tags=[],
+            prompt="dark clouds", negative_prompt="bright sky",
+        )
+        selected = self.browser.select_quick_entry(self.store, 0, json.dumps([snippet.id]), False)
+        self.assertEqual(("bright sky", "dark clouds"), selected[2:4])
+        with patch.object(self.browser.shared, "opts", SimpleNamespace(prompt_workspace_show_negative_prompts=True), create=True):
+            selected = self.browser.select_quick_entry(self.store, 0, json.dumps([snippet.id]), False)
+        self.assertEqual(("bright sky", "dark clouds\n\nNegative prompt: bright sky"), selected[2:4])
+
     def test_selecting_grid_entries_and_installing_generation_resolver(self):
         snippet = self.store.save_entry(
             None,

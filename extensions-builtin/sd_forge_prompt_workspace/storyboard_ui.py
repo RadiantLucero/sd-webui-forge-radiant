@@ -1,10 +1,11 @@
 import json
 from functools import partial
+from html import escape
 
 import gradio as gr
 from gradio.context import get_blocks_context
 from prompt_workspace_data import MAX_SECTIONS
-from storyboard_data import StoryboardStore
+from storyboard_data import StoryboardStore, asset_reference
 
 
 def project_choices(store):
@@ -29,7 +30,7 @@ def snippet_choices(library):
 
 def insert_snippet(library, entry_id, target):
     _, text, negative = library.select_entry(entry_id, as_reference=True)
-    warning = f"Add this snippet's negative text to the scene manually: {negative}" if negative else ""
+    warning = "This snippet also has a negative prompt; copy it from the library if needed." if negative else ""
     return " ".join(part for part in (target.strip(), text) if part), warning
 
 
@@ -39,7 +40,7 @@ def empty_scene_values():
         *(gr.update(value="", visible=False, interactive=False) for _ in range(MAX_SECTIONS)),
         gr.update(value="", interactive=False),
         gr.update(choices=[], value=None), gr.update(choices=[], value=None),
-        "", "", None,
+        "", "", None, "",
     )
 
 
@@ -59,6 +60,25 @@ def selection_choices(store, project, scene):
             name += " / " + store._find(asset["outfits"], selected["outfit_id"], "Outfit")["name"]
         selections.append((name, asset["id"]))
     return selections
+
+
+def asset_palette(store, project, scene):
+    names = {asset["id"]: asset["name"] for asset in store._draft_assets(project, scene["draft"])}
+    chips = "".join(
+        # A span instead of a button, because Firefox does not start drags from buttons.
+        f'<span role="button" tabindex="0" draggable="true" class="storyboard-asset-chip" '
+        f'data-asset-reference="{escape(asset_reference(names[asset_id]), quote=True)}" title="{escape(asset_reference(names[asset_id]), quote=True)}">'
+        f"{escape(label)}</span>"
+        for label, asset_id in selection_choices(store, project, scene)
+    )
+    if not chips:
+        return "<p>Add assets to this scene in the Cast step first.</p>"
+    return (
+        "<p>Drag an asset into a section or the template at the desired text position, "
+        "or click in a text field and then click the asset.</p>"
+        f'<div class="storyboard-asset-chips">{chips}</div>'
+        '<p class="storyboard-asset-feedback" role="status" aria-live="polite"></p>'
+    )
 
 
 def scene_values(store, project_id, scene_id):
@@ -81,6 +101,7 @@ def scene_values(store, project_id, scene_id):
         variant["prompt"] if variant else "",
         variant["negative"] if variant else "",
         variant["image"] if variant else None,
+        asset_palette(store, project, scene),
     )
 
 
@@ -106,7 +127,7 @@ def rename_project(store, project_id, name):
 
 def delete_project(store, project_id):
     if not project_id:
-        return *((gr.skip(),) * (MAX_SECTIONS + 10)), "Select a storyboard to delete"
+        return *((gr.skip(),) * (MAX_SECTIONS + 11)), "Select a storyboard to delete"
     store.delete(project_id)
     return (
         gr.update(choices=project_choices(store), value=None),
@@ -135,7 +156,7 @@ def rename_scene(store, project_id, scene_id, name):
 
 def delete_scene(store, project_id, scene_id):
     if not project_id or not scene_id:
-        return *((gr.skip(),) * (MAX_SECTIONS + 8)), "Select a storyboard and scene to delete"
+        return *((gr.skip(),) * (MAX_SECTIONS + 9)), "Select a storyboard and scene to delete"
     store.delete_scene(project_id, scene_id)
     return gr.update(choices=scene_choices(store.load(project_id)), value=None), *empty_scene_values(), "Scene deleted"
 
@@ -219,8 +240,10 @@ def add_selection(store, project_id, scene_id, asset_id, outfit_id):
 
 
 def remove_selection(store, project_id, scene_id, asset_id):
+    if not project_id or not scene_id or not asset_id:
+        return *((gr.skip(),) * (MAX_SECTIONS + 8)), "Select a scene asset to remove"
     store.remove_asset(project_id, scene_id, asset_id)
-    return gr.update(choices=selection_choices(store, *get_scene(store, project_id, scene_id)), value=None)
+    return *scene_values(store, project_id, scene_id), "Removed from scene"
 
 
 def save_variant(store, project_id, scene_id, name):
@@ -231,18 +254,18 @@ def save_variant(store, project_id, scene_id, name):
 
 def load_variant(store, project_id, scene_id, variant_id):
     if not project_id or not scene_id or not variant_id:
-        return *((gr.skip(),) * (MAX_SECTIONS + 7)), "Select a storyboard, scene and variant to load"
+        return *((gr.skip(),) * (MAX_SECTIONS + 8)), "Select a storyboard, scene and variant to load"
     store.select_variant(project_id, scene_id, variant_id)
     return *scene_values(store, project_id, scene_id), ""
 
 
 def step_variant(store, project_id, scene_id, direction):
     if not project_id or not scene_id:
-        return *((gr.skip(),) * (MAX_SECTIONS + 7)), "Select a storyboard and scene first"
+        return *((gr.skip(),) * (MAX_SECTIONS + 8)), "Select a storyboard and scene first"
     _, scene = get_scene(store, project_id, scene_id)
     variants = scene["variants"]
     if not variants:
-        return *((gr.skip(),) * (MAX_SECTIONS + 7)), "This scene has no saved variants"
+        return *((gr.skip(),) * (MAX_SECTIONS + 8)), "This scene has no saved variants"
     current = next((index for index, item in enumerate(variants) if item["id"] == scene["selected_variant"]), 0)
     store.select_variant(project_id, scene_id, variants[(current + direction) % len(variants)]["id"])
     return *scene_values(store, project_id, scene_id), ""
@@ -267,6 +290,13 @@ def variant_prompt(store, project_id, scene_id, variant_id):
 def preview_draft(store, project_id, scene_id):
     project, scene = get_scene(store, project_id, scene_id)
     return store.resolve(project, scene["draft"])
+
+
+def prompt_step_values(store, project_id, scene_id):
+    if not project_id or not scene_id:
+        return "", "", ""
+    project, scene = get_scene(store, project_id, scene_id)
+    return asset_palette(store, project, scene), *store.resolve(project, scene["draft"])
 
 
 def storyboard_ui(library, apply_js):
@@ -328,13 +358,14 @@ def storyboard_ui(library, apply_js):
                         selection = gr.Dropdown(label="Assets in scene")
                         remove_selected_asset = gr.Button("Remove from scene", size="sm", scale=0, min_width=0)
                         cast_status = gr.Markdown()
-                    with gr.Tab("b · Prompt & image"):
-                        template = gr.Textbox(label="Scene template", lines=3, interactive=False, info="Place sections using <<Section>> and write transitions freely.")
+                    with gr.Tab("b · Prompt & image") as prompt_tab:
+                        palette = gr.HTML(elem_id="storyboard_asset_palette")
+                        template = gr.Textbox(label="Scene template", lines=3, interactive=False, info="Place sections using <<Section>> and write transitions freely.", elem_classes=["storyboard-prompt-source"])
                         with gr.Row(equal_height=False):
-                            sections = [gr.Textbox(label=f"Section {index + 1}", lines=2, visible=False, interactive=False) for index in range(5)]
+                            sections = [gr.Textbox(label=f"Section {index + 1}", lines=2, visible=False, interactive=False, elem_classes=["storyboard-prompt-source"]) for index in range(5)]
                         with gr.Row(equal_height=False):
-                            sections += [gr.Textbox(label=f"Section {index + 1}", lines=2, visible=False, interactive=False) for index in range(5, MAX_SECTIONS)]
-                        negative = gr.Textbox(label="Negative prompt", lines=2, interactive=False)
+                            sections += [gr.Textbox(label=f"Section {index + 1}", lines=2, visible=False, interactive=False, elem_classes=["storyboard-prompt-source"]) for index in range(5, MAX_SECTIONS)]
+                        negative = gr.Textbox(label="Negative prompt", lines=2, interactive=False, elem_classes=["prompt-workspace-negative"])
                         draft_status = gr.Markdown()
                         with gr.Row(equal_height=False):
                             variant = gr.Dropdown(label="Scene variant")
@@ -352,7 +383,7 @@ def storyboard_ui(library, apply_js):
                         with gr.Row(equal_height=False):
                             with gr.Column():
                                 prompt = gr.Textbox(label="Resolved prompt", lines=4, interactive=False)
-                                negative_result = gr.Textbox(label="Resolved negative prompt", lines=2, interactive=False)
+                                negative_result = gr.Textbox(label="Resolved negative prompt", lines=2, interactive=False, elem_classes=["prompt-workspace-negative"])
                                 with gr.Row(equal_height=False, elem_classes=["prompt-workspace-actions"]):
                                     apply_txt = gr.Button("Apply selected variant to txt2img", size="sm", scale=0, min_width=0)
                                     apply_img = gr.Button("Apply selected variant to img2img", size="sm", scale=0, min_width=0)
@@ -364,7 +395,7 @@ def storyboard_ui(library, apply_js):
         selected_prompt = gr.Textbox(visible=False)
         selected_negative = gr.Textbox(visible=False)
 
-        scene_outputs = [template, *sections, negative, selection, variant, prompt, negative_result, image]
+        scene_outputs = [template, *sections, negative, selection, variant, prompt, negative_result, image, palette]
         common = {"concurrency_id": "storyboard", "show_progress": "hidden"}
         create.click(partial(create_project, store), [project_name, directory], [project, directory, scene, asset, *scene_outputs], **common)
         project.input(partial(project_values, store), project, [directory, scene, asset, *scene_outputs], **common)
@@ -372,6 +403,7 @@ def storyboard_ui(library, apply_js):
         project.input(partial(cast_values, store), [project, cast_asset, cast_outfit], [cast_asset, cast_outfit], **common)
         for tab in (scenes_tab, cast_tab):
             tab.select(partial(cast_values, store), [project, cast_asset, cast_outfit], [cast_asset, cast_outfit], **common)
+        prompt_tab.select(partial(prompt_step_values, store), [project, scene], [palette, prompt, negative_result], **common)
         rename.click(partial(rename_project, store), [project, project_name], project, **common)
         delete.click(
             partial(delete_project, store), project, [project, scene, asset, *scene_outputs, project_status],
@@ -396,6 +428,9 @@ def storyboard_ui(library, apply_js):
         )
         delete_asset_button.click(
             partial(delete_asset, store), [project, scene, asset], [asset, outfit, selection, asset_status], **common,
+        ).then(
+            lambda project_id, scene_id: scene_values(store, project_id, scene_id) if project_id and scene_id else (gr.skip(),) * len(scene_outputs),
+            [project, scene], scene_outputs, **common,
         ).then(partial(cast_values, store), [project, cast_asset, cast_outfit], [cast_asset, cast_outfit], **common)
         refresh_snippets.click(lambda: gr.update(choices=snippet_choices(library)), outputs=snippet, **common)
         snippet_to_asset.click(partial(insert_snippet, library), [snippet, asset_text], [asset_text, asset_status], **common)
@@ -405,7 +440,7 @@ def storyboard_ui(library, apply_js):
         new_outfit.click(lambda: (gr.update(value=None), "", ""), outputs=[outfit, outfit_name, outfit_text], **common)
         cast_asset.input(partial(cast_outfits, store), [project, cast_asset], cast_outfit, **common)
         add_selected_asset.click(partial(add_selection, store), [project, scene, cast_asset, cast_outfit], [selection, cast_status], **common)
-        remove_selected_asset.click(partial(remove_selection, store), [project, scene, selection], selection, **common)
+        remove_selected_asset.click(partial(remove_selection, store), [project, scene, selection], [*scene_outputs, cast_status], **common)
         for field, component in (("template", template), ("negative", negative)):
             component.input(partial(update_text, store, field), [project, scene, component], draft_status, trigger_mode="always_last", **common)
         for index, component in enumerate(sections):

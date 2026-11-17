@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import tempfile
 import threading
 import uuid
@@ -17,6 +18,29 @@ from prompt_workspace_data import (
 
 _lock = threading.RLock()
 _version = 1
+ASSET_REFERENCE_PATTERN = re.compile(r"<asset:\s*([^<>]+?)\s*>")
+
+
+def asset_reference(name):
+    return f"<asset:{name}>"
+
+
+def draft_texts(scene_draft):
+    return [scene_draft["template"], *(section["text"] for section in scene_draft["sections"]), scene_draft["negative"]]
+
+
+def referenced_asset_names(scene_draft):
+    return {match.group(1).casefold() for text in draft_texts(scene_draft) for match in ASSET_REFERENCE_PATTERN.finditer(text)}
+
+
+def remove_asset_references(scene_draft, name):
+    def remove(text):
+        return ASSET_REFERENCE_PATTERN.sub(lambda match: "" if match.group(1).casefold() == name.casefold() else match.group(0), text)
+
+    scene_draft["template"] = remove(scene_draft["template"])
+    scene_draft["negative"] = remove(scene_draft["negative"])
+    for section in scene_draft["sections"]:
+        section["text"] = remove(section["text"])
 
 
 def new_id():
@@ -36,6 +60,7 @@ def draft(section_names):
         "negative": "",
         "selections": [],
         "context": None,
+        "asset_placement": "explicit",
     }
 
 
@@ -173,7 +198,17 @@ class StoryboardStore:
                 scene["draft"][field] = value
             else:
                 raise ValueError("Invalid draft field")
+            placed = referenced_asset_names(scene["draft"])
+            names = {asset["id"]: asset["name"].casefold() for asset in self._draft_assets(project, scene["draft"])}
+            for selection in scene["draft"]["selections"]:
+                if names.get(selection["asset_id"]) in placed:
+                    selection["placement"] = "explicit"
             self._write(project)
+
+    @staticmethod
+    def _draft_assets(project, scene_draft):
+        context = scene_draft["context"]
+        return context["assets"] if context is not None else project["assets"]
 
     @staticmethod
     def _named(items, name, preferred_id=None):
@@ -198,6 +233,8 @@ class StoryboardStore:
         if kind not in ("Character", "Location", "Object"):
             raise ValueError("Invalid asset type")
         name = required_text(name, "Asset name")
+        if "<" in name or ">" in name:
+            raise ValueError("Asset names cannot contain < or >")
         text = required_text(text, "Asset text")
         with _lock:
             project = self.load(project_id)
@@ -225,12 +262,13 @@ class StoryboardStore:
     def delete_asset(self, project_id, asset_id):
         with _lock:
             project = self.load(project_id)
-            self._find(project["assets"], asset_id, "Asset")
+            name = self._find(project["assets"], asset_id, "Asset")["name"]
             project["assets"] = [item for item in project["assets"] if item["id"] != asset_id]
             for scene in project["scenes"]:
                 scene_draft = scene["draft"]
                 if scene_draft["context"] is None:
                     scene_draft["selections"] = [item for item in scene_draft["selections"] if item["asset_id"] != asset_id]
+                    remove_asset_references(scene_draft, name)
             self._write(project)
 
     def select_asset(self, project_id, scene_id, asset_id, outfit_id):
@@ -243,15 +281,19 @@ class StoryboardStore:
             if outfit_id:
                 self._find(asset["outfits"], outfit_id, "Outfit")
             selections = scene["draft"]["selections"]
+            previous = next((item for item in selections if item["asset_id"] == asset_id), {})
             selections[:] = [item for item in selections if item["asset_id"] != asset_id]
-            selections.append({"asset_id": asset_id, "outfit_id": outfit_id or None})
+            selections.append({**previous, "asset_id": asset_id, "outfit_id": outfit_id or None})
             self._write(project)
 
     def remove_asset(self, project_id, scene_id, asset_id):
         with _lock:
             project = self.load(project_id)
             scene = self._find(project["scenes"], scene_id, "Scene")
+            asset = next((item for item in self._draft_assets(project, scene["draft"]) if item["id"] == asset_id), None)
             scene["draft"]["selections"] = [item for item in scene["draft"]["selections"] if item["asset_id"] != asset_id]
+            if asset is not None:
+                remove_asset_references(scene["draft"], asset["name"])
             self._write(project)
 
     def refresh_draft_context(self, project_id, scene_id):
@@ -264,22 +306,44 @@ class StoryboardStore:
     def resolve(self, project, scene_draft):
         sections = deepcopy(scene_draft["sections"])
         context = scene_draft["context"]
-        assets = context["assets"] if context is not None else project["assets"]
+        assets = self._draft_assets(project, scene_draft)
+        placed = referenced_asset_names(scene_draft)
+        asset_texts = {}
+        ambiguous = set()
         for selected in scene_draft["selections"]:
             asset = self._find(assets, selected["asset_id"], "Asset")
             parts = [asset["text"]]
             if selected["outfit_id"]:
                 parts.append(self._find(asset["outfits"], selected["outfit_id"], "Outfit")["text"])
-            section_name = "Subject" if asset["kind"] in ("Character", "Object") else "Environment"
-            fallback_index = 0 if section_name == "Subject" else min(2, len(sections) - 1)
-            target = next((section for section in sections if section["name"].casefold() == section_name.casefold()), sections[fallback_index])
             text = ", ".join(parts)
             if asset["kind"] == "Character":
                 text = f"{asset['name']}: {text}"
-            target["text"] = "; ".join(part for part in (target["text"].strip(), text) if part)
+            key = asset["name"].casefold()
+            if key in asset_texts:
+                ambiguous.add(key)
+            asset_texts[key] = text
+            if scene_draft.get("asset_placement") != "explicit" and selected.get("placement") != "explicit" and key not in placed:
+                section_name = "Subject" if asset["kind"] in ("Character", "Object") else "Environment"
+                fallback_index = 0 if section_name == "Subject" else min(2, len(sections) - 1)
+                target = next((section for section in sections if section["name"].casefold() == section_name.casefold()), sections[fallback_index])
+                target["text"] = "; ".join(part for part in (target["text"].strip(), text) if part)
+
+        def expand_assets(text):
+            def replace(match):
+                key = match.group(1).casefold()
+                if key in ambiguous:
+                    raise ValueError(f"Asset reference {match.group(0)} is ambiguous; delete the duplicate asset")
+                if key not in asset_texts:
+                    raise ValueError(f"Asset reference {match.group(0)} is not assigned to this scene")
+                return asset_texts[key]
+
+            return ASSET_REFERENCE_PATTERN.sub(replace, text)
+
+        for section in sections:
+            section["text"] = expand_assets(section["text"])
         references = context["references"] if context is not None else reference_map(self.library.load())
-        positive = compose_prompt(scene_draft["template"], sections, references)
-        negative = resolve_references(scene_draft["negative"], references)
+        positive = compose_prompt(expand_assets(scene_draft["template"]), sections, references)
+        negative = resolve_references(expand_assets(scene_draft["negative"]), references)
         return positive, negative
 
     def snapshot_context(self, project, scene_draft):
