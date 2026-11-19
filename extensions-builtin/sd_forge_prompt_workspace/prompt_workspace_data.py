@@ -23,6 +23,10 @@ P = ParamSpec("P")
 T = TypeVar("T")
 
 
+class PromptResolutionError(ValueError):
+    pass
+
+
 def _lock_writes(function: Callable[P, T]) -> Callable[P, T]:
     @wraps(function)
     def wrapped(*args: P.args, **kwargs: P.kwargs) -> T:
@@ -131,11 +135,11 @@ def resolve_references(text: str, references: dict[str, str], trail: tuple[str, 
         name = match.group(1)
         key = name.casefold()
         if key in trail:
-            raise ValueError(f"Circular reference: {' -> '.join(f'<{item}>' for item in (*trail, key))}")
+            raise PromptResolutionError(f"Circular reference: {' -> '.join(f'<{item}>' for item in (*trail, key))}")
         if key not in references:
             if allow_unknown:
                 return match.group(0)
-            raise ValueError(f"Unknown reference <{name}>")
+            raise PromptResolutionError(f"Unknown reference <{name}>")
         return resolve_references(references[key], references, (*trail, key), allow_unknown)
 
     return substitute_prompt(REFERENCE_PATTERN, text, replace)
@@ -147,7 +151,7 @@ def compose_prompt(template: str, sections: list[dict[str, str]], references: di
     def replace(match):
         name = match.group(1).strip()
         if name.casefold() not in texts:
-            raise ValueError(f"Unknown section <<{name}>>")
+            raise PromptResolutionError(f"Unknown section <<{name}>>")
         return f" {texts[name.casefold()]} "
 
     return normalize_prompt_text(resolve_references(substitute_prompt(SECTION_PATTERN, template, replace), references))

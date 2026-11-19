@@ -7,6 +7,15 @@ from gradio.context import get_blocks_context
 from prompt_workspace_data import MAX_SECTIONS, join_prompt_parts
 from storyboard_data import StoryboardStore, asset_reference
 
+SCENE_VALUE_COUNT = MAX_SECTIONS + 11
+
+
+def variant_status(variant):
+    status = f"Saved in variant '{escape(variant['name'], quote=False)}'."
+    if variant.get("resolution_error"):
+        status += f" Cannot resolve prompt: {escape(variant['resolution_error'], quote=False)}"
+    return status
+
 
 def project_choices(store):
     return [(project["name"], project["id"]) for project in store.list_projects()]
@@ -36,11 +45,13 @@ def insert_snippet(library, entry_id, target):
 
 def empty_scene_values():
     return (
+        "",
+        "",
         gr.update(value="", interactive=False),
         *(gr.update(value="", visible=False, interactive=False) for _ in range(MAX_SECTIONS)),
         gr.update(value="", interactive=False),
         gr.update(choices=[], value=None), gr.update(choices=[], value=None),
-        "", "", None, "",
+        "", "", None, "", "",
     )
 
 
@@ -54,10 +65,14 @@ def selection_choices(store, project, scene):
     context = scene["draft"]["context"]
     assets = context["assets"] if context is not None else project["assets"]
     for selected in scene["draft"]["selections"]:
-        asset = store._find(assets, selected["asset_id"], "Asset")
+        asset = next((item for item in assets if item["id"] == selected["asset_id"]), None)
+        if asset is None:
+            selections.append((f"Missing asset: {selected['asset_id']}", selected["asset_id"]))
+            continue
         name = asset["name"]
         if selected["outfit_id"]:
-            name += " / " + store._find(asset["outfits"], selected["outfit_id"], "Outfit")["name"]
+            outfit = next((item for item in asset["outfits"] if item["id"] == selected["outfit_id"]), None)
+            name += " / " + (outfit["name"] if outfit else "Missing outfit")
         selections.append((name, asset["id"]))
     return selections
 
@@ -70,11 +85,15 @@ def asset_palette(store, project, scene):
         f'data-asset-reference="{escape(asset_reference(names[asset_id]), quote=True)}" title="{escape(asset_reference(names[asset_id]), quote=True)}">'
         f"{escape(label)}</span>"
         for label, asset_id in selection_choices(store, project, scene)
+        if asset_id in names
     )
+    warning = "<p>Some assigned assets are missing. Remove them in Cast or restore their definitions.</p>" if any(
+        selected["asset_id"] not in names for selected in scene["draft"]["selections"]
+    ) else ""
     if not chips:
-        return "<p>Add assets to this scene in the Cast step first.</p>"
+        return warning or "<p>Add assets to this scene in the Cast step first.</p>"
     return (
-        "<p>Drag an asset into a section or the template at the desired text position, "
+        f"{warning}<p>Drag an asset into a section or the template at the desired text position, "
         "or click in a text field and then click the asset.</p>"
         f'<div class="storyboard-asset-chips">{chips}</div>'
         '<p class="storyboard-asset-feedback" role="status" aria-live="polite"></p>'
@@ -87,8 +106,10 @@ def scene_values(store, project_id, scene_id):
     selections = selection_choices(store, project, scene)
     variants = variant_choices(scene)
     chosen = scene["selected_variant"]
-    variant = store._find(scene["variants"], chosen, "Variant") if chosen else None
+    variant = store._find(scene["variants"], chosen, "Variant")
     return (
+        json.dumps([project_id, scene_id, chosen]),
+        json.dumps([project_id, scene_id, chosen]),
         gr.update(value=scene_draft["template"], interactive=True),
         *(
             gr.update(label=scene_draft["sections"][index]["name"], value=scene_draft["sections"][index]["text"], visible=True, interactive=True)
@@ -98,10 +119,11 @@ def scene_values(store, project_id, scene_id):
         gr.update(value=scene_draft["negative"], interactive=True),
         gr.update(choices=selections, value=None),
         gr.update(choices=variants, value=chosen),
-        variant["prompt"] if variant else "",
-        variant["negative"] if variant else "",
-        variant["image"] if variant else None,
+        variant["prompt"] if variant["prompt"] is not None else "",
+        variant["negative"] if variant["negative"] is not None else "",
+        variant["image"],
         asset_palette(store, project, scene),
+        variant_status(variant),
     )
 
 
@@ -127,7 +149,7 @@ def rename_project(store, project_id, name):
 
 def delete_project(store, project_id):
     if not project_id:
-        return *((gr.skip(),) * (MAX_SECTIONS + 11)), "Select a storyboard to delete"
+        return *((gr.skip(),) * (SCENE_VALUE_COUNT + 3)), "Select a storyboard to delete"
     store.delete(project_id)
     return (
         gr.update(choices=project_choices(store), value=None),
@@ -156,14 +178,36 @@ def rename_scene(store, project_id, scene_id, name):
 
 def delete_scene(store, project_id, scene_id):
     if not project_id or not scene_id:
-        return *((gr.skip(),) * (MAX_SECTIONS + 9)), "Select a storyboard and scene to delete"
+        return *((gr.skip(),) * (SCENE_VALUE_COUNT + 1)), "Select a storyboard and scene to delete"
     store.delete_scene(project_id, scene_id)
     return gr.update(choices=scene_choices(store.load(project_id)), value=None), *empty_scene_values(), "Scene deleted"
 
 
-def update_text(store, field, project_id, scene_id, value, section_index=None):
-    store.update_draft(project_id, scene_id, field, value, section_index)
-    return "Draft saved"
+def update_text(store, field, editor, current_editor, value, section_index=None):
+    if not editor:
+        raise gr.Error("Select a scene and variant before editing")
+    project_id, scene_id, variant_id = json.loads(editor)
+    variant = store.update_draft(project_id, scene_id, field, value, section_index, variant_id=variant_id)
+    if editor != current_editor or get_scene(store, project_id, scene_id)[1]["selected_variant"] != variant_id:
+        return gr.skip(), gr.skip(), gr.skip()
+    positive = variant["prompt"] if variant["prompt"] is not None else ""
+    negative = variant["negative"] if variant["negative"] is not None else ""
+    return variant_status(variant), positive, negative
+
+
+def save_editor_then(store, action, editor, template, negative, *values):
+    # A click can overtake the last pending autosave; use the complete editor snapshot.
+    section_texts, action_inputs = values[:MAX_SECTIONS], values[MAX_SECTIONS:]
+    if len(section_texts) != MAX_SECTIONS:
+        raise ValueError("Incomplete scene editor contents")
+    if editor:
+        project_id, scene_id, variant_id = json.loads(editor)
+        _, scene = get_scene(store, project_id, scene_id)
+        variant = store._find(scene["variants"], variant_id, "Variant")
+        updates = [("template", template, None), ("negative", negative, None)]
+        updates.extend(("section", text, index) for index, text in enumerate(section_texts[:len(variant["draft"]["sections"])]))
+        store.update_draft_fields(project_id, scene_id, updates, variant_id=variant_id)
+    return action(store, *action_inputs)
 
 
 def outfit_choices(asset):
@@ -241,60 +285,69 @@ def add_selection(store, project_id, scene_id, asset_id, outfit_id):
 
 def remove_selection(store, project_id, scene_id, asset_id):
     if not project_id or not scene_id or not asset_id:
-        return *((gr.skip(),) * (MAX_SECTIONS + 8)), "Select a scene asset to remove"
+        return *((gr.skip(),) * SCENE_VALUE_COUNT), "Select a scene asset to remove"
     store.remove_asset(project_id, scene_id, asset_id)
     return *scene_values(store, project_id, scene_id), "Removed from scene"
 
 
 def save_variant(store, project_id, scene_id, name):
-    variant = store.save_variant(project_id, scene_id, name)
-    _, scene = get_scene(store, project_id, scene_id)
-    return gr.update(choices=variant_choices(scene), value=variant["id"]), variant["prompt"], variant["negative"], None
+    store.save_variant(project_id, scene_id, name)
+    return scene_values(store, project_id, scene_id)
 
 
 def load_variant(store, project_id, scene_id, variant_id):
     if not project_id or not scene_id or not variant_id:
-        return *((gr.skip(),) * (MAX_SECTIONS + 8)), "Select a storyboard, scene and variant to load"
+        return *((gr.skip(),) * (SCENE_VALUE_COUNT - 1)), "Select a storyboard, scene and variant to load"
     store.select_variant(project_id, scene_id, variant_id)
-    return *scene_values(store, project_id, scene_id), ""
+    return scene_values(store, project_id, scene_id)
 
 
 def step_variant(store, project_id, scene_id, direction):
     if not project_id or not scene_id:
-        return *((gr.skip(),) * (MAX_SECTIONS + 8)), "Select a storyboard and scene first"
+        return *((gr.skip(),) * (SCENE_VALUE_COUNT - 1)), "Select a storyboard and scene first"
     _, scene = get_scene(store, project_id, scene_id)
     variants = scene["variants"]
     if not variants:
-        return *((gr.skip(),) * (MAX_SECTIONS + 8)), "This scene has no saved variants"
+        return *((gr.skip(),) * (SCENE_VALUE_COUNT - 1)), "This scene has no saved variants"
     current = next((index for index, item in enumerate(variants) if item["id"] == scene["selected_variant"]), 0)
     store.select_variant(project_id, scene_id, variants[(current + direction) % len(variants)]["id"])
-    return *scene_values(store, project_id, scene_id), ""
+    return scene_values(store, project_id, scene_id)
 
 
 def delete_variant(store, project_id, scene_id, variant_id):
     if not project_id or not scene_id or not variant_id:
-        return *((gr.skip(),) * 4), "Select a storyboard, scene and variant to delete"
+        return *((gr.skip(),) * (SCENE_VALUE_COUNT - 1)), "Select a storyboard, scene and variant to delete"
+    if len(get_scene(store, project_id, scene_id)[1]["variants"]) == 1:
+        return *((gr.skip(),) * (SCENE_VALUE_COUNT - 1)), "A scene must keep at least one variant"
     store.delete_variant(project_id, scene_id, variant_id)
-    _, scene = get_scene(store, project_id, scene_id)
-    return gr.update(choices=variant_choices(scene), value=None), "", "", None, "Variant deleted"
+    *values, status = scene_values(store, project_id, scene_id)
+    return *values, f"Variant deleted. {status}"
 
 
 def draft_prompt(store, project_id, scene_id):
     if not project_id or not scene_id:
-        raise gr.Error("Select a storyboard and scene before sending the draft")
-    return "prompt", *preview_draft(store, project_id, scene_id)
+        raise gr.Error("Select a storyboard and scene before sending the active variant")
+    variant = store.sync_variant(project_id, scene_id)
+    if variant["resolution_error"]:
+        raise gr.Error(variant["resolution_error"])
+    return "prompt", variant["prompt"], variant["negative"]
 
 
 def preview_draft(store, project_id, scene_id):
-    project, scene = get_scene(store, project_id, scene_id)
-    return store.resolve(project, scene["draft"])
+    variant = store.sync_variant(project_id, scene_id)
+    return variant["prompt"] or "", variant["negative"] or "", variant_status(variant)
+
+
+def refresh_variant_context(store, project_id, scene_id):
+    store.refresh_draft_context(project_id, scene_id)
+    return scene_values(store, project_id, scene_id)
 
 
 def prompt_step_values(store, project_id, scene_id):
     if not project_id or not scene_id:
-        return "", "", ""
+        return "", "", "", ""
     project, scene = get_scene(store, project_id, scene_id)
-    return asset_palette(store, project, scene), *store.resolve(project, scene["draft"])
+    return asset_palette(store, project, scene), *preview_draft(store, project_id, scene_id)
 
 
 def storyboard_ui(library, apply_js, build_library_browser):
@@ -367,25 +420,24 @@ def storyboard_ui(library, apply_js, build_library_browser):
                         draft_status = gr.Markdown()
                         build_library_browser(library, "storyboard")
                         with gr.Row(equal_height=False):
-                            variant = gr.Dropdown(label="Scene variant")
+                            variant = gr.Dropdown(label="Active scene variant")
                             with gr.Row(equal_height=False, elem_classes=["prompt-workspace-actions"]):
                                 previous_variant = gr.Button("Previous", size="sm", scale=0, min_width=0)
                                 next_variant = gr.Button("Next", size="sm", scale=0, min_width=0)
-                                load = gr.Button("Load and select variant", size="sm", scale=0, min_width=0)
                                 delete_variant_button = gr.Button("Delete variant", size="sm", scale=0, min_width=0)
                         with gr.Row(equal_height=False):
                             variant_name = gr.Textbox(label="New variant name")
                             with gr.Row(equal_height=False, elem_classes=["prompt-workspace-actions"]):
-                                save = gr.Button("Save draft as new variant", size="sm", scale=0, min_width=0)
-                                preview = gr.Button("Preview draft", size="sm", scale=0, min_width=0)
+                                save = gr.Button("Create variant copy", size="sm", scale=0, min_width=0)
+                                preview = gr.Button("Preview variant", size="sm", scale=0, min_width=0)
                                 refresh_context = gr.Button("Use current library and project assets", size="sm", scale=0, min_width=0)
                         with gr.Row(equal_height=False):
                             with gr.Column():
                                 prompt = gr.Textbox(label="Resolved prompt", lines=4, interactive=False)
                                 negative_result = gr.Textbox(label="Resolved negative prompt", lines=2, interactive=False, elem_classes=["prompt-workspace-negative"])
                                 with gr.Row(equal_height=False, elem_classes=["prompt-workspace-actions"]):
-                                    apply_txt = gr.Button("Send draft to txt2img", size="sm", scale=0, min_width=0)
-                                    apply_img = gr.Button("Send draft to img2img", size="sm", scale=0, min_width=0)
+                                    apply_txt = gr.Button("Send active variant to txt2img", size="sm", scale=0, min_width=0)
+                                    apply_img = gr.Button("Send active variant to img2img", size="sm", scale=0, min_width=0)
                                     refresh_scene = gr.Button("Refresh scene", size="sm", scale=0, min_width=0)
                                 status = gr.Markdown()
                             with gr.Column():
@@ -393,25 +445,29 @@ def storyboard_ui(library, apply_js, build_library_browser):
         kind = gr.Textbox(value="prompt", visible=False)
         selected_prompt = gr.Textbox(visible=False)
         selected_negative = gr.Textbox(visible=False)
+        # Capture each queued edit's origin separately from the editor currently displayed.
+        editor = gr.Textbox(visible=False)
+        current_editor = gr.State("")
 
-        scene_outputs = [template, *sections, negative, selection, variant, prompt, negative_result, image, palette]
+        scene_outputs = [current_editor, editor, template, *sections, negative, selection, variant, prompt, negative_result, image, palette, draft_status]
+        editor_inputs = [editor, template, negative, *sections]
         common = {"concurrency_id": "storyboard", "show_progress": "hidden"}
         create.click(partial(create_project, store), [project_name, directory], [project, directory, scene, asset, *scene_outputs], **common)
-        project.input(partial(project_values, store), project, [directory, scene, asset, *scene_outputs], **common)
+        project.input(partial(save_editor_then, store, project_values), [*editor_inputs, project], [directory, scene, asset, *scene_outputs], **common)
         project.input(lambda project_id: store.load(project_id)["name"], project, project_name, **common)
         project.input(partial(cast_values, store), [project, cast_asset, cast_outfit], [cast_asset, cast_outfit], **common)
         for tab in (scenes_tab, cast_tab):
             tab.select(partial(cast_values, store), [project, cast_asset, cast_outfit], [cast_asset, cast_outfit], **common)
-        prompt_tab.select(partial(prompt_step_values, store), [project, scene], [palette, prompt, negative_result], **common)
+        prompt_tab.select(partial(prompt_step_values, store), [project, scene], [palette, prompt, negative_result, draft_status], **common)
         rename.click(partial(rename_project, store), [project, project_name], project, **common)
         delete.click(
             partial(delete_project, store), project, [project, scene, asset, *scene_outputs, project_status],
             **common,
         ).then(partial(cast_values, store), [project, cast_asset, cast_outfit], [cast_asset, cast_outfit], **common)
         set_directory.click(lambda project_id, path: (store.set_image_directory(project_id, path), "Image directory saved")[1], [project, directory], project_status, **common)
-        create_scene_button.click(partial(create_scene, store), [project, scene_name], [scene, *scene_outputs], **common)
-        scene.input(partial(scene_values, store), [project, scene], scene_outputs, **common)
-        refresh_scene.click(partial(scene_values, store), [project, scene], scene_outputs, **common)
+        create_scene_button.click(partial(save_editor_then, store, create_scene), [*editor_inputs, project, scene_name], [scene, *scene_outputs], **common)
+        scene.input(partial(save_editor_then, store, scene_values), [*editor_inputs, project, scene], scene_outputs, **common)
+        refresh_scene.click(partial(save_editor_then, store, scene_values), [*editor_inputs, project, scene], scene_outputs, **common)
         scene.input(lambda project_id, scene_id: get_scene(store, project_id, scene_id)[1]["name"], [project, scene], scene_name, **common)
         rename_scene_button.click(partial(rename_scene, store), [project, scene, scene_name], scene, **common)
         move_up.click(partial(move_scene, store, direction=-1), [project, scene], scene, **common)
@@ -439,41 +495,44 @@ def storyboard_ui(library, apply_js, build_library_browser):
         new_outfit.click(lambda: (gr.update(value=None), "", ""), outputs=[outfit, outfit_name, outfit_text], **common)
         cast_asset.input(partial(cast_outfits, store), [project, cast_asset], cast_outfit, **common)
         add_selected_asset.click(partial(add_selection, store), [project, scene, cast_asset, cast_outfit], [selection, cast_status], **common)
-        remove_selected_asset.click(partial(remove_selection, store), [project, scene, selection], [*scene_outputs, cast_status], **common)
+        remove_selected_asset.click(partial(save_editor_then, store, remove_selection), [*editor_inputs, project, scene, selection], [*scene_outputs, cast_status], **common)
         for field, component in (("template", template), ("negative", negative)):
-            component.input(partial(update_text, store, field), [project, scene, component], draft_status, trigger_mode="always_last", **common)
+            component.input(partial(update_text, store, field), [editor, current_editor, component], [draft_status, prompt, negative_result], trigger_mode="always_last", **common)
         for index, component in enumerate(sections):
-            component.input(partial(update_text, store, "section", section_index=index), [project, scene, component], draft_status, trigger_mode="always_last", **common)
-        preview.click(partial(preview_draft, store), [project, scene], [prompt, negative_result], **common)
+            component.input(partial(update_text, store, "section", section_index=index), [editor, current_editor, component], [draft_status, prompt, negative_result], trigger_mode="always_last", **common)
+        preview.click(partial(save_editor_then, store, preview_draft), [*editor_inputs, project, scene], [prompt, negative_result, draft_status], **common)
         refresh_context.click(
-            lambda project_id, scene_id: (store.refresh_draft_context(project_id, scene_id), "Draft now uses current definitions")[1],
-            [project, scene], draft_status, **common,
+            partial(save_editor_then, store, refresh_variant_context),
+            [*editor_inputs, project, scene], scene_outputs, **common,
         )
-        save.click(partial(save_variant, store), [project, scene, variant_name], [variant, prompt, negative_result, image], **common)
-        load.click(
-            partial(load_variant, store), [project, scene, variant], [*scene_outputs, draft_status],
+        save.click(partial(save_editor_then, store, save_variant), [*editor_inputs, project, scene, variant_name], scene_outputs, **common)
+        variant.input(
+            partial(save_editor_then, store, load_variant), [*editor_inputs, project, scene, variant], scene_outputs,
             **common,
         )
         for button, direction in ((previous_variant, -1), (next_variant, 1)):
             button.click(
-                partial(step_variant, store, direction=direction), [project, scene], [*scene_outputs, draft_status],
+                partial(save_editor_then, store, partial(step_variant, direction=direction)), [*editor_inputs, project, scene], scene_outputs,
                 **common,
             )
         delete_variant_button.click(
             partial(delete_variant, store),
-            [project, scene, variant], [variant, prompt, negative_result, image, draft_status],
+            [project, scene, variant], scene_outputs,
             **common,
         )
         for button, tab in ((apply_txt, "txt2img"), (apply_img, "img2img")):
             button.click(
-                partial(draft_prompt, store), [project, scene],
+                partial(save_editor_then, store, draft_prompt), [*editor_inputs, project, scene],
                 [kind, selected_prompt, selected_negative], **common,
             ).success(
                 fn=None,
                 js=apply_js(tab),
                 inputs=[kind, selected_prompt, selected_negative], outputs=status, show_progress="hidden",
             )
-        publish.click(lambda project_id: f"Published to: {store.publish(project_id)}", project, project_status, **common)
+        publish.click(
+            partial(save_editor_then, store, lambda store, project_id: f"Published to: {store.publish(project_id)}"),
+            [*editor_inputs, project], project_status, **common,
+        )
     return ui
 
 

@@ -11,6 +11,7 @@ from pathlib import Path
 from PIL import Image, ImageOps, PngImagePlugin
 from prompt_workspace_data import (
     REFERENCE_PATTERN,
+    PromptResolutionError,
     compose_prompt,
     join_prompt_parts,
     reference_map,
@@ -19,7 +20,7 @@ from prompt_workspace_data import (
 )
 
 _lock = threading.RLock()
-_version = 1
+_version = 2
 ASSET_REFERENCE_PATTERN = re.compile(r"<asset:\s*([^<>]+?)\s*>")
 
 
@@ -77,6 +78,10 @@ class StoryboardStore:
         return self.directory / f"{project_id}.json"
 
     def load(self, project_id):
+        with _lock:
+            return self._load(project_id)
+
+    def _load(self, project_id):
         path = self._path(project_id)
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
@@ -84,12 +89,17 @@ class StoryboardStore:
             raise ValueError("Storyboard no longer exists") from error
         except json.JSONDecodeError as error:
             raise ValueError(f"Invalid storyboard JSON: {path}") from error
-        if not isinstance(data, dict) or data.get("format_version") != _version or data.get("id") != project_id:
+        if not isinstance(data, dict) or data.get("format_version") not in (1, _version) or data.get("id") != project_id:
             raise ValueError(f"Unsupported or invalid storyboard: {path}")
         if not isinstance(data.get("name"), str) or not isinstance(data.get("image_directory"), str):
             raise ValueError(f"Invalid storyboard fields: {path}")
         if not isinstance(data.get("assets"), list) or not isinstance(data.get("scenes"), list):
             raise ValueError(f"Invalid storyboard assets or scenes: {path}")
+        if data["format_version"] == 1:
+            for scene in data["scenes"]:
+                self._sync_variant(data, scene)
+            data["format_version"] = _version
+            self._write(data)
         return data
 
     def list_projects(self):
@@ -143,11 +153,41 @@ class StoryboardStore:
             self._path(project_id).unlink()
 
     @staticmethod
-    def _find(items, item_id, label):
+    def _find(items, item_id, label, error_type=ValueError):
         item = next((item for item in items if item["id"] == item_id), None)
         if item is None:
-            raise ValueError(f"{label} no longer exists")
+            raise error_type(f"{label} no longer exists")
         return item
+
+    def _sync_variant(self, project, scene, variant=None, scene_draft=None):
+        if variant is None:
+            if scene["selected_variant"]:
+                variant = self._find(scene["variants"], scene["selected_variant"], "Active variant")
+            else:
+                name = "Start"
+                number = 2
+                while self._named(scene["variants"], name) is not None:
+                    name = f"Start {number}"
+                    number += 1
+                variant = {"id": new_id(), "name": name, "image": None, "infotext": ""}
+                scene["variants"].append(variant)
+                scene["selected_variant"] = variant["id"]
+        snapshot = deepcopy(scene["draft"] if scene_draft is None else scene_draft)
+        if snapshot["context"] is None:
+            snapshot["context"] = self.snapshot_context(project, snapshot)
+        try:
+            positive, negative = self.resolve(project, snapshot)
+        except PromptResolutionError as error:
+            variant.update(prompt=None, negative=None, resolution_error=str(error))
+        else:
+            variant.update(prompt=positive, negative=negative, resolution_error=None)
+        variant["draft"] = snapshot
+        return variant
+
+    def _sync_live_variants(self, project):
+        for scene in project["scenes"]:
+            if scene["draft"]["context"] is None:
+                self._sync_variant(project, scene)
 
     def add_scene(self, project_id, name):
         with _lock:
@@ -155,6 +195,7 @@ class StoryboardStore:
             scene_draft = deepcopy(project["scenes"][-1]["draft"]) if project["scenes"] else draft(self.library.section_names())
             scene = {"id": new_id(), "name": required_text(name, "Scene name"), "draft": scene_draft, "variants": [], "selected_variant": None}
             project["scenes"].append(scene)
+            self._sync_variant(project, scene)
             self._write(project)
             return scene
 
@@ -187,26 +228,34 @@ class StoryboardStore:
             project["scenes"].insert(target, project["scenes"].pop(index))
             self._write(project)
 
-    def update_draft(self, project_id, scene_id, field, value, section_index=None):
-        if not isinstance(value, str):
-            raise ValueError("Prompt text must be text")
+    def update_draft(self, project_id, scene_id, field, value, section_index=None, variant_id=None):
+        return self.update_draft_fields(project_id, scene_id, [(field, value, section_index)], variant_id)
+
+    def update_draft_fields(self, project_id, scene_id, updates, variant_id=None):
         with _lock:
             project = self.load(project_id)
             scene = self._find(project["scenes"], scene_id, "Scene")
-            if field == "section":
-                if not isinstance(section_index, int) or not 0 <= section_index < len(scene["draft"]["sections"]):
-                    raise ValueError("Invalid section")
-                scene["draft"]["sections"][section_index]["text"] = value
-            elif field in ("template", "negative"):
-                scene["draft"][field] = value
-            else:
-                raise ValueError("Invalid draft field")
-            placed = referenced_asset_names(scene["draft"])
-            names = {asset["id"]: asset["name"].casefold() for asset in self._draft_assets(project, scene["draft"])}
-            for selection in scene["draft"]["selections"]:
+            variant = self._find(scene["variants"], variant_id or scene["selected_variant"], "Variant")
+            scene_draft = scene["draft"] if variant["id"] == scene["selected_variant"] else deepcopy(variant["draft"])
+            for field, value, section_index in updates:
+                if not isinstance(value, str):
+                    raise ValueError("Prompt text must be text")
+                if field == "section":
+                    if not isinstance(section_index, int) or not 0 <= section_index < len(scene_draft["sections"]):
+                        raise ValueError("Invalid section")
+                    scene_draft["sections"][section_index]["text"] = value
+                elif field in ("template", "negative"):
+                    scene_draft[field] = value
+                else:
+                    raise ValueError("Invalid draft field")
+            placed = referenced_asset_names(scene_draft)
+            names = {asset["id"]: asset["name"].casefold() for asset in self._draft_assets(project, scene_draft)}
+            for selection in scene_draft["selections"]:
                 if names.get(selection["asset_id"]) in placed:
                     selection["placement"] = "explicit"
+            self._sync_variant(project, scene, variant, scene_draft)
             self._write(project)
+            return variant
 
     @staticmethod
     def _draft_assets(project, scene_draft):
@@ -252,6 +301,7 @@ class StoryboardStore:
             outfit = None
             if (outfit_name or "").strip() or (outfit_text or "").strip():
                 outfit = self._upsert_outfit(asset, outfit_name, outfit_text)
+            self._sync_live_variants(project)
             self._write(project)
             return asset, outfit
 
@@ -259,6 +309,7 @@ class StoryboardStore:
         with _lock:
             project = self.load(project_id)
             outfit = self._upsert_outfit(self._find(project["assets"], asset_id, "Character"), name, text)
+            self._sync_live_variants(project)
             self._write(project)
             return outfit
 
@@ -272,6 +323,7 @@ class StoryboardStore:
                 if scene_draft["context"] is None:
                     scene_draft["selections"] = [item for item in scene_draft["selections"] if item["asset_id"] != asset_id]
                     remove_asset_references(scene_draft, name)
+                    self._sync_variant(project, scene)
             self._write(project)
 
     def select_asset(self, project_id, scene_id, asset_id, outfit_id):
@@ -280,13 +332,16 @@ class StoryboardStore:
             scene = self._find(project["scenes"], scene_id, "Scene")
             context = scene["draft"]["context"]
             assets = context["assets"] if context is not None else project["assets"]
-            asset = self._find(assets, asset_id, "Asset in this draft; refresh the draft context")
+            asset = next((item for item in assets if item["id"] == asset_id), None)
+            if asset is None:
+                raise ValueError("This asset is not in the variant's saved definitions. Use 'Use current library and project assets' first.")
             if outfit_id:
                 self._find(asset["outfits"], outfit_id, "Outfit")
             selections = scene["draft"]["selections"]
             previous = next((item for item in selections if item["asset_id"] == asset_id), {})
             selections[:] = [item for item in selections if item["asset_id"] != asset_id]
             selections.append({**previous, "asset_id": asset_id, "outfit_id": outfit_id or None})
+            self._sync_variant(project, scene)
             self._write(project)
 
     def remove_asset(self, project_id, scene_id, asset_id):
@@ -297,6 +352,7 @@ class StoryboardStore:
             scene["draft"]["selections"] = [item for item in scene["draft"]["selections"] if item["asset_id"] != asset_id]
             if asset is not None:
                 remove_asset_references(scene["draft"], asset["name"])
+            self._sync_variant(project, scene)
             self._write(project)
 
     def refresh_draft_context(self, project_id, scene_id):
@@ -304,6 +360,8 @@ class StoryboardStore:
             project = self.load(project_id)
             scene = self._find(project["scenes"], scene_id, "Scene")
             scene["draft"]["context"] = None
+            variant = self._sync_variant(project, scene)
+            scene["draft"] = deepcopy(variant["draft"])
             self._write(project)
 
     def resolve(self, project, scene_draft):
@@ -314,10 +372,10 @@ class StoryboardStore:
         asset_texts = {}
         ambiguous = set()
         for selected in scene_draft["selections"]:
-            asset = self._find(assets, selected["asset_id"], "Asset")
+            asset = self._find(assets, selected["asset_id"], "Asset", PromptResolutionError)
             text = asset["text"]
             if selected["outfit_id"]:
-                outfit = self._find(asset["outfits"], selected["outfit_id"], "Outfit")
+                outfit = self._find(asset["outfits"], selected["outfit_id"], "Outfit", PromptResolutionError)
                 text = join_prompt_parts(text, outfit["text"], ", ")
             if asset["kind"] == "Character":
                 text = f"{asset['name']}: {text}"
@@ -335,9 +393,9 @@ class StoryboardStore:
             def replace(match):
                 key = match.group(1).casefold()
                 if key in ambiguous:
-                    raise ValueError(f"Asset reference {match.group(0)} is ambiguous; delete the duplicate asset")
+                    raise PromptResolutionError(f"Asset reference {match.group(0)} is ambiguous; delete the duplicate asset")
                 if key not in asset_texts:
-                    raise ValueError(f"Asset reference {match.group(0)} is not assigned to this scene")
+                    raise PromptResolutionError(f"Asset reference {match.group(0)} is not assigned to this scene")
                 return asset_texts[key]
 
             return substitute_prompt(ASSET_REFERENCE_PATTERN, text, replace)
@@ -374,18 +432,20 @@ class StoryboardStore:
             name = required_text(name, "Variant name")
             if any(item["name"].casefold() == name.casefold() for item in scene["variants"]):
                 raise ValueError("A variant with this name already exists")
-            snapshot = deepcopy(scene["draft"])
-            if snapshot["context"] is None:
-                snapshot["context"] = self.snapshot_context(project, snapshot)
-            positive, negative = self.resolve(project, snapshot)
-            if not positive and not negative:
-                raise ValueError("Enter a prompt before saving a variant")
-            variant = {
-                "id": new_id(), "name": name, "draft": snapshot,
-                "prompt": positive, "negative": negative, "image": None, "infotext": "",
-            }
+            self._sync_variant(project, scene)
+            variant = {"id": new_id(), "name": name, "image": None, "infotext": ""}
             scene["variants"].append(variant)
             scene["selected_variant"] = variant["id"]
+            self._sync_variant(project, scene, variant)
+            scene["draft"] = deepcopy(variant["draft"])
+            self._write(project)
+            return variant
+
+    def sync_variant(self, project_id, scene_id):
+        with _lock:
+            project = self.load(project_id)
+            scene = self._find(project["scenes"], scene_id, "Scene")
+            variant = self._sync_variant(project, scene)
             self._write(project)
             return variant
 
@@ -394,8 +454,10 @@ class StoryboardStore:
             project = self.load(project_id)
             scene = self._find(project["scenes"], scene_id, "Scene")
             variant = self._find(scene["variants"], variant_id, "Variant")
+            self._sync_variant(project, scene)
             scene["selected_variant"] = variant_id
             scene["draft"] = deepcopy(variant["draft"])
+            self._sync_variant(project, scene, variant)
             self._write(project)
             return scene
 
@@ -404,9 +466,15 @@ class StoryboardStore:
             project = self.load(project_id)
             scene = self._find(project["scenes"], scene_id, "Scene")
             variant = self._find(scene["variants"], variant_id, "Variant")
+            if len(scene["variants"]) == 1:
+                raise ValueError("A scene must keep at least one variant")
+            index = scene["variants"].index(variant)
             scene["variants"].remove(variant)
             if scene["selected_variant"] == variant_id:
-                scene["selected_variant"] = None
+                selected = scene["variants"][max(0, index - 1)]
+                scene["selected_variant"] = selected["id"]
+                scene["draft"] = deepcopy(selected["draft"])
+                self._sync_variant(project, scene, selected)
             self._write(project)
 
     def assign_image(self, project_id, scene_id, variant_id, image, infotext):
@@ -469,6 +537,8 @@ class StoryboardStore:
                 if not scene["selected_variant"]:
                     raise ValueError(f"Scene '{scene['name']}' has no selected variant")
                 variant = self._find(scene["variants"], scene["selected_variant"], f"Selected variant for {scene['name']}")
+                if variant.get("resolution_error"):
+                    raise PromptResolutionError(f"Scene '{scene['name']}': {variant['resolution_error']}")
                 if not variant["image"] or not Path(variant["image"]).is_file():
                     raise ValueError(f"Scene '{scene['name']}' has no image for its selected variant")
                 image_path = Path(variant["image"])

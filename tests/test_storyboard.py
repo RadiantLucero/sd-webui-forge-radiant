@@ -15,9 +15,14 @@ from PIL import Image
 EXTENSION_DIR = Path(__file__).resolve().parents[1] / "extensions-builtin" / "sd_forge_prompt_workspace"
 sys.path.insert(0, str(EXTENSION_DIR))
 
-from prompt_workspace_data import MAX_SECTIONS, PromptWorkspaceStore
+from prompt_workspace_data import (
+    MAX_SECTIONS,
+    PromptResolutionError,
+    PromptWorkspaceStore,
+)
 from storyboard_data import StoryboardStore, asset_reference
 from storyboard_ui import (
+    SCENE_VALUE_COUNT,
     add_selection,
     cast_values,
     delete_asset,
@@ -28,10 +33,16 @@ from storyboard_ui import (
     gallery_callback,
     insert_snippet,
     load_variant,
+    preview_draft,
     prompt_step_values,
+    refresh_variant_context,
     remove_selection,
+    save_editor_then,
+    save_variant,
+    scene_values,
     step_variant,
     take_image,
+    update_text,
 )
 
 
@@ -275,6 +286,251 @@ class StoryboardTests(unittest.TestCase):
             tags=[], prompt=text, negative_prompt="", reference="character",
         )
 
+    def test_autosave_preserves_other_variants_and_keeps_assigned_images(self):
+        self.store.update_draft(self.pid, self.sid, "section", "a station", 0)
+        start_id = self.scene["selected_variant"]
+        start_image = self.store.assign_image(self.pid, self.sid, start_id, Image.new("RGB", (1, 1)), "Start image")
+        start = deepcopy(self.store.load(self.pid)["scenes"][0]["variants"][0])
+        copy = self.store.save_variant(self.pid, self.sid, "Night")
+        self.assertIsNone(copy["image"])
+        image = self.store.assign_image(self.pid, self.sid, copy["id"], Image.new("RGB", (1, 1)), "Night image")
+        self.store.update_draft(self.pid, self.sid, "template", "<<Subject>> at <<Action>>")
+        self.store.update_draft(self.pid, self.sid, "section", "night", 1)
+        self.store.update_draft(self.pid, self.sid, "negative", "blur")
+        scene = self.store.load(self.pid)["scenes"][0]
+        active = self.store._find(scene["variants"], copy["id"], "Variant")
+        self.assertEqual(start, scene["variants"][0])
+        self.assertEqual(("a station at night", "blur"), (active["prompt"], active["negative"]))
+        self.assertEqual(str(image), active["image"])
+        self.assertEqual("Night image", active["infotext"])
+        self.assertEqual(scene["draft"]["sections"], active["draft"]["sections"])
+        restored = self.store.select_variant(self.pid, self.sid, start_id)
+        self.assertEqual("a station", restored["draft"]["sections"][0]["text"])
+        self.assertEqual("", restored["draft"]["sections"][1]["text"])
+        self.assertEqual(str(start_image), restored["variants"][0]["image"])
+        self.assertTrue(image.is_file())
+
+    def test_new_variant_uses_its_frozen_context_for_later_edits(self):
+        snippet = self.snippet(None, "red hair")
+        character, _ = self.store.save_asset(self.pid, None, "Character", "Mara", "<character>")
+        self.store.select_asset(self.pid, self.sid, character["id"], None)
+        self.store.update_draft(self.pid, self.sid, "template", "<asset:Mara>")
+        first = self.store.save_variant(self.pid, self.sid, "Original")
+        self.assertIn("red hair", first["prompt"])
+
+        self.snippet(snippet.id, "dark hair")
+        self.store.update_draft(self.pid, self.sid, "negative", "blur")
+        scene = self.store.load(self.pid)["scenes"][0]
+        self.assertIn("red hair", scene["variants"][1]["prompt"])
+        self.assertNotIn("dark hair", scene["variants"][1]["prompt"])
+        self.assertEqual("red hair", scene["variants"][1]["draft"]["context"]["references"]["character"])
+        self.assertEqual("blur", scene["draft"]["negative"])
+
+        refresh_variant_context(self.store, self.pid, self.sid)
+        scene = self.store.load(self.pid)["scenes"][0]
+        self.assertIn("dark hair", scene["variants"][1]["prompt"])
+        self.assertEqual("dark hair", scene["draft"]["context"]["references"]["character"])
+
+    def test_migration_adopts_latest_draft_without_changing_other_variants_or_images(self):
+        self.store.update_draft(self.pid, self.sid, "section", "saved text", 0)
+        active = self.store.save_variant(self.pid, self.sid, "Existing")
+        image = self.store.assign_image(self.pid, self.sid, active["id"], Image.new("RGB", (1, 1)), "kept infotext")
+        legacy = self.store.load(self.pid)
+        legacy["format_version"] = 1
+        legacy["scenes"][0]["draft"]["sections"][0]["text"] = "latest draft"
+        legacy["scenes"][0]["draft"]["negative"] = "new negative"
+        inactive = deepcopy(legacy["scenes"][0]["variants"][0])
+        self.store._write(legacy)
+
+        migrated = self.store.load(self.pid)
+        scene = migrated["scenes"][0]
+        variant = self.store._find(scene["variants"], active["id"], "Variant")
+        self.assertEqual(active["id"], scene["selected_variant"])
+        self.assertEqual(legacy["scenes"][0]["draft"], scene["draft"])
+        self.assertEqual(("latest draft", "new negative"), (variant["prompt"], variant["negative"]))
+        self.assertEqual(str(image), variant["image"])
+        self.assertEqual("kept infotext", variant["infotext"])
+        self.assertEqual(inactive, scene["variants"][0])
+        self.assertEqual(migrated, json.loads(self.store._path(self.pid).read_text(encoding="utf-8")))
+        with patch.object(self.store, "_write", side_effect=AssertionError("Migration repeated")):
+            self.assertEqual(migrated, self.store.load(self.pid))
+
+    def test_migration_creates_start_without_losing_invalid_or_unselected_drafts(self):
+        original = self.store.load(self.pid)
+        for keep_existing in (False, True):
+            with self.subTest(keep_existing=keep_existing):
+                legacy = deepcopy(original)
+                legacy["format_version"] = 1
+                scene = legacy["scenes"][0]
+                if not keep_existing:
+                    scene["variants"] = []
+                previous = deepcopy(scene["variants"])
+                scene["selected_variant"] = None
+                scene["draft"]["template"] = "<asset:Missing>"
+                self.store._write(legacy)
+
+                migrated = self.store.load(self.pid)["scenes"][0]
+                variant = migrated["variants"][-1]
+                self.assertEqual("Start 2" if keep_existing else "Start", variant["name"])
+                self.assertEqual(variant["id"], migrated["selected_variant"])
+                self.assertEqual(previous, migrated["variants"][:-1])
+                self.assertEqual(scene["draft"], migrated["draft"])
+                self.assertIsNone(variant["prompt"])
+                self.assertIn("not assigned", variant["resolution_error"])
+                values = scene_values(self.store, self.pid, self.sid)
+                self.assertEqual(SCENE_VALUE_COUNT, len(values))
+                self.assertIn("not assigned", values[-1])
+
+    def test_unfinished_edits_are_saved_without_stale_preview_and_recover(self):
+        self.store.update_draft(self.pid, self.sid, "section", "original", 0)
+        self.store.update_draft(self.pid, self.sid, "negative", "blur")
+        variant_id = self.scene["selected_variant"]
+        image = self.store.assign_image(self.pid, self.sid, variant_id, Image.new("RGB", (1, 1)), "keep")
+        editor = scene_values(self.store, self.pid, self.sid)[0]
+        cases = (
+            ("template", "<<Missing>>", None, "Unknown section", "<<Subject>>"),
+            ("section", "<unknown>", 0, "Unknown reference", "original"),
+            ("negative", "<asset:Ghost>", None, "not assigned", "blur"),
+        )
+        for field, invalid, index, error, repaired in cases:
+            with self.subTest(field=field):
+                status, positive, negative = update_text(
+                    self.store, field, editor, editor, invalid, section_index=index,
+                )
+                self.assertIn(error, status)
+                self.assertEqual(("", ""), (positive, negative))
+                scene = self.store.load(self.pid)["scenes"][0]
+                variant = scene["variants"][0]
+                saved = variant["draft"]["sections"][index]["text"] if field == "section" else variant["draft"][field]
+                self.assertEqual(invalid, saved)
+                self.assertEqual(str(image), variant["image"])
+                self.assertIsNone(variant["prompt"])
+                self.assertIsNone(variant["negative"])
+                self.assertIn(error, variant["resolution_error"])
+                self.assertEqual(("", ""), preview_draft(self.store, self.pid, self.sid)[:2])
+                with self.assertRaisesRegex(gr.Error, error):
+                    draft_prompt(self.store, self.pid, self.sid)
+                with self.assertRaisesRegex(PromptResolutionError, error):
+                    self.store.publish(self.pid)
+                update_text(self.store, field, editor, editor, repaired, section_index=index)
+                restored = self.store.load(self.pid)["scenes"][0]["variants"][0]
+                self.assertIsNone(restored["resolution_error"])
+                self.assertEqual(("original", "blur"), (restored["prompt"], restored["negative"]))
+        self.assertTrue(image.is_file())
+        self.store.update_draft(self.pid, self.sid, "template", "<<Missing>>")
+        copy = self.store.save_variant(self.pid, self.sid, "Unfinished copy")
+        self.assertIn("Unknown section", copy["resolution_error"])
+        self.store.update_draft(self.pid, self.sid, "template", "<<Subject>>")
+        scene = self.store.load(self.pid)["scenes"][0]
+        self.assertIn("Unknown section", scene["variants"][0]["resolution_error"])
+        self.assertIsNone(scene["variants"][1]["resolution_error"])
+
+    def test_library_storage_errors_are_not_reported_as_successful_autosaves(self):
+        before = self.store.load(self.pid)
+        with patch.object(self.library, "load", side_effect=ValueError("Invalid library JSON")):
+            with self.assertRaisesRegex(ValueError, "Invalid library JSON"):
+                self.store.update_draft(self.pid, self.sid, "section", "new text", 0)
+        self.assertEqual(before, self.store.load(self.pid))
+
+    def test_queued_input_updates_its_original_variant_not_the_new_editor(self):
+        self.store.update_draft(self.pid, self.sid, "section", "base", 0)
+        original_editor = scene_values(self.store, self.pid, self.sid)[0]
+        copy = self.store.save_variant(self.pid, self.sid, "Copy")
+        current_editor = scene_values(self.store, self.pid, self.sid)[0]
+        result = update_text(
+            self.store, "section", original_editor, current_editor, "late original edit", section_index=0,
+        )
+        self.assertEqual((gr.skip(),) * 3, result)
+        scene = self.store.load(self.pid)["scenes"][0]
+        self.assertEqual("late original edit", scene["variants"][0]["prompt"])
+        self.assertEqual("base", scene["draft"]["sections"][0]["text"])
+        self.assertEqual(copy["id"], scene["selected_variant"])
+
+        other = self.store.add_scene(self.pid, "Other")
+        other_editor = scene_values(self.store, self.pid, other["id"])[0]
+        result = update_text(
+            self.store, "negative", current_editor, other_editor, "late copy edit",
+        )
+        self.assertEqual((gr.skip(),) * 3, result)
+        scenes = self.store.load(self.pid)["scenes"]
+        self.assertEqual("late copy edit", scenes[0]["variants"][1]["negative"])
+        self.assertEqual("", scenes[1]["variants"][0]["negative"])
+
+    def test_variant_actions_include_visible_edits_before_pending_autosaves_finish(self):
+        editor = scene_values(self.store, self.pid, self.sid)[0]
+        texts = ["latest subject", "walking", *([""] * (MAX_SECTIONS - 2))]
+        values = save_editor_then(
+            self.store, save_variant, editor, "<<Subject>> <<Action>>", "blur",
+            *texts, self.pid, self.sid, "Copy",
+        )
+        scene = self.store.load(self.pid)["scenes"][0]
+        copy_id = scene["selected_variant"]
+        self.assertEqual("latest subject walking", scene["variants"][0]["prompt"])
+        self.assertEqual("latest subject walking", scene["variants"][1]["prompt"])
+        self.assertEqual("blur", scene["variants"][1]["negative"])
+
+        texts[0] = "just typed"
+        result = save_editor_then(
+            self.store, draft_prompt, values[0], "<<Subject>> <<Action>>", "blur",
+            *texts, self.pid, self.sid,
+        )
+        self.assertEqual(("prompt", "just typed walking", "blur"), result)
+        texts[1] = "running"
+        values = save_editor_then(
+            self.store, load_variant, values[0], "<<Subject>> <<Action>>", "blur",
+            *texts, self.pid, self.sid, self.scene["selected_variant"],
+        )
+        scene = self.store.load(self.pid)["scenes"][0]
+        self.assertEqual("latest subject", scene["draft"]["sections"][0]["text"])
+        self.assertEqual("just typed running", self.store._find(scene["variants"], copy_id, "Variant")["prompt"])
+        self.assertEqual(SCENE_VALUE_COUNT, len(values))
+
+    def test_cast_and_context_changes_are_saved_only_in_the_active_variant(self):
+        character, coat = self.store.save_asset(self.pid, None, "Character", "Mara", "red hair", "Coat", "blue coat")
+        dress = self.store.save_outfit(self.pid, character["id"], "Dress", "green dress")
+        self.store.select_asset(self.pid, self.sid, character["id"], coat["id"])
+        self.store.update_draft(self.pid, self.sid, "template", "<asset:Mara>")
+        copy = self.store.save_variant(self.pid, self.sid, "Dress")
+        self.store.select_variant(self.pid, self.sid, copy["id"])
+        self.store.select_asset(self.pid, self.sid, character["id"], dress["id"])
+        self.store.save_outfit(self.pid, character["id"], "Dress", "red dress")
+        self.assertIn("green dress", self.store.load(self.pid)["scenes"][0]["variants"][1]["prompt"])
+        refresh_variant_context(self.store, self.pid, self.sid)
+        scene = self.store.load(self.pid)["scenes"][0]
+        self.assertIn("blue coat", scene["variants"][0]["prompt"])
+        self.assertIn("red dress", scene["variants"][1]["prompt"])
+        self.assertEqual(dress["id"], scene["variants"][1]["draft"]["selections"][0]["outfit_id"])
+        self.store.remove_asset(self.pid, self.sid, character["id"])
+        scene = self.store.load(self.pid)["scenes"][0]
+        self.assertEqual([], scene["variants"][1]["draft"]["selections"])
+        self.assertEqual("", scene["variants"][1]["prompt"])
+        self.assertIn("blue coat", scene["variants"][0]["prompt"])
+
+    def test_refresh_with_missing_asset_keeps_variant_editable_and_reports_the_error(self):
+        character, _ = self.store.save_asset(self.pid, None, "Character", "Mara", "red hair")
+        self.store.select_asset(self.pid, self.sid, character["id"], None)
+        self.store.update_draft(self.pid, self.sid, "template", "<asset:Mara>")
+        self.store.select_variant(self.pid, self.sid, self.scene["selected_variant"])
+        self.store.delete_asset(self.pid, character["id"])
+        values = refresh_variant_context(self.store, self.pid, self.sid)
+        self.assertEqual(SCENE_VALUE_COUNT, len(values))
+        self.assertIn("Asset no longer exists", values[-1])
+        self.assertIn("Some assigned assets are missing", values[-2])
+        self.store.remove_asset(self.pid, self.sid, character["id"])
+        scene = self.store.load(self.pid)["scenes"][0]
+        self.assertEqual([], scene["draft"]["selections"])
+        self.store.update_draft(self.pid, self.sid, "template", "repaired")
+        self.assertEqual("repaired", scene_values(self.store, self.pid, self.sid)[-5])
+
+    def test_last_variant_cannot_be_deleted(self):
+        before = self.store.load(self.pid)
+        with self.assertRaisesRegex(ValueError, "at least one variant"):
+            self.store.delete_variant(self.pid, self.sid, self.scene["selected_variant"])
+        values = delete_variant(self.store, self.pid, self.sid, self.scene["selected_variant"])
+        self.assertEqual(SCENE_VALUE_COUNT, len(values))
+        self.assertIn("at least one variant", values[-1])
+        self.assertEqual(before, self.store.load(self.pid))
+
     def test_scenes_reuse_characters_outfits_and_freeze_variants(self):
         snippet = self.snippet(None, "red hair")
         character, outfit = self.store.save_asset(self.pid, None, "Character", "Mara", "<character>", "Coat", "blue coat")
@@ -295,14 +551,16 @@ class StoryboardTests(unittest.TestCase):
         project = self.store.load(self.pid)
         scene = project["scenes"][0]
         self.assertEqual(variant["prompt"], scene["variants"][0]["prompt"])
-        self.assertIn("new dark hair", self.store.resolve(project, scene["draft"])[0])
+        self.assertIn("Mara: red hair, blue coat", self.store.resolve(project, scene["draft"])[0])
         self.store.update_draft(self.pid, self.sid, "section", "running", 1)
         restored = self.store.select_variant(self.pid, self.sid, variant["id"])
-        self.assertEqual("walking", restored["draft"]["sections"][1]["text"])
+        self.assertEqual("running", restored["draft"]["sections"][1]["text"])
         self.assertIn("Mara: red hair, blue coat", self.store.resolve(self.store.load(self.pid), restored["draft"])[0])
+        self.assertIn("Mara: red hair, blue coat", restored["variants"][0]["prompt"])
+        self.assertEqual("walking", restored["variants"][0]["draft"]["sections"][1]["text"])
         self.store.refresh_draft_context(self.pid, self.sid)
         project = self.store.load(self.pid)
-        self.assertIn("new dark hair", self.store.resolve(project, project["scenes"][0]["draft"])[0])
+        self.assertIn("new dark hair, blue coat", self.store.resolve(project, project["scenes"][0]["draft"])[0])
         with self.assertRaisesRegex(ValueError, "already exists"):
             self.store.save_variant(self.pid, self.sid, "first")
 
@@ -320,7 +578,7 @@ class StoryboardTests(unittest.TestCase):
         self.store.update_draft(self.pid, self.sid, "template", template)
         self.store.update_draft(self.pid, self.sid, "section", action, 1)
         self.store.update_draft(self.pid, self.sid, "negative", "blur")
-        palette, prompt, negative = prompt_step_values(self.store, self.pid, self.sid)
+        palette, prompt, negative, _ = prompt_step_values(self.store, self.pid, self.sid)
         self.assertEqual(
             "Before a station. Facing Mara: red hair, blue coat, a passerby waves at Mara: red hair, blue coat. After.",
             prompt,
@@ -377,8 +635,8 @@ class StoryboardTests(unittest.TestCase):
         project["assets"].append(duplicate)
         project["scenes"][0]["draft"]["selections"].append({"asset_id": duplicate["id"], "outfit_id": None})
         self.store._write(project)
-        with self.assertRaisesRegex(ValueError, "ambiguous"):
-            prompt_step_values(self.store, self.pid, self.sid)
+        self.assertIn("ambiguous", prompt_step_values(self.store, self.pid, self.sid)[-1])
+        self.assertEqual(("", ""), prompt_step_values(self.store, self.pid, self.sid)[1:3])
 
     def test_legacy_assets_stop_automatic_placement_after_manual_insertion(self):
         character, _ = self.store.save_asset(self.pid, None, "Character", "Mara", "red hair")
@@ -415,10 +673,9 @@ class StoryboardTests(unittest.TestCase):
         self.store.select_asset(self.pid, self.sid, character["id"], None)
         self.store.update_draft(self.pid, self.sid, "section", token, 1)
         self.store.delete_asset(self.pid, character["id"])
-        self.assertEqual("", self.store.load(self.pid)["scenes"][0]["draft"]["sections"][1]["text"])
-        self.store.update_draft(self.pid, self.sid, "section", token, 1)
-        with self.assertRaisesRegex(ValueError, "not assigned to this scene"):
-            prompt_step_values(self.store, self.pid, self.sid)
+        scene = self.store.load(self.pid)["scenes"][0]
+        self.assertEqual(token, scene["draft"]["sections"][1]["text"])
+        self.assertIn('Mara "Red" & Co: red hair', scene["variants"][1]["prompt"])
 
     def test_each_variant_has_its_own_image_and_publication_is_clean(self):
         self.store.update_draft(self.pid, self.sid, "section", "station", 0)
@@ -484,20 +741,20 @@ class StoryboardTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Select an image"):
             take_image(self.store, self.pid, self.sid, variant["id"], gallery, info, -1)
         take_image(self.store, self.pid, self.sid, variant["id"], gallery, info, 1)
-        image_path = self.store.load(self.pid)["scenes"][0]["variants"][0]["image"]
+        scene = self.store.load(self.pid)["scenes"][0]
+        image_path = self.store._find(scene["variants"], variant["id"], "Variant")["image"]
         with Image.open(image_path) as image:
             self.assertEqual((0, 0, 255), image.getpixel((0, 0)))
             self.assertEqual("second", image.info["parameters"])
 
     def test_storyboard_actions_report_missing_selections_without_clearing_inputs(self):
         cases = (
-            (delete_project(self.store, None), MAX_SECTIONS + 12, "Select a storyboard to delete"),
-            (delete_scene(self.store, self.pid, None), MAX_SECTIONS + 10, "Select a storyboard and scene to delete"),
-            (load_variant(self.store, self.pid, self.sid, None), MAX_SECTIONS + 9, "Select a storyboard, scene and variant to load"),
-            (step_variant(self.store, None, None, 1), MAX_SECTIONS + 9, "Select a storyboard and scene first"),
-            (step_variant(self.store, self.pid, self.sid, 1), MAX_SECTIONS + 9, "This scene has no saved variants"),
-            (remove_selection(self.store, self.pid, self.sid, None), MAX_SECTIONS + 9, "Select a scene asset to remove"),
-            (delete_variant(self.store, self.pid, self.sid, None), 5, "Select a storyboard, scene and variant to delete"),
+            (delete_project(self.store, None), SCENE_VALUE_COUNT + 4, "Select a storyboard to delete"),
+            (delete_scene(self.store, self.pid, None), SCENE_VALUE_COUNT + 2, "Select a storyboard and scene to delete"),
+            (load_variant(self.store, self.pid, self.sid, None), SCENE_VALUE_COUNT, "Select a storyboard, scene and variant to load"),
+            (step_variant(self.store, None, None, 1), SCENE_VALUE_COUNT, "Select a storyboard and scene first"),
+            (remove_selection(self.store, self.pid, self.sid, None), SCENE_VALUE_COUNT + 1, "Select a scene asset to remove"),
+            (delete_variant(self.store, self.pid, self.sid, None), SCENE_VALUE_COUNT, "Select a storyboard, scene and variant to delete"),
         )
         for result, length, message in cases:
             with self.subTest(message=message):
@@ -511,23 +768,34 @@ class StoryboardTests(unittest.TestCase):
         first = self.store.save_variant(self.pid, self.sid, "First")
         self.store.update_draft(self.pid, self.sid, "section", "second draft", 0)
         second = self.store.save_variant(self.pid, self.sid, "Second")
-        self.store.update_draft(self.pid, self.sid, "section", "unsaved changes", 0)
+        self.store.update_draft(self.pid, self.sid, "section", "latest changes", 0)
 
         result = step_variant(self.store, self.pid, self.sid, -1)
         scene = self.store.load(self.pid)["scenes"][0]
         self.assertEqual(first["id"], scene["selected_variant"])
-        self.assertEqual("first draft", scene["draft"]["sections"][0]["text"])
-        self.assertEqual((MAX_SECTIONS + 9, ""), (len(result), result[-1]))
+        self.assertEqual("second draft", scene["draft"]["sections"][0]["text"])
+        self.assertEqual(SCENE_VALUE_COUNT, len(result))
+        self.assertIn("First", result[-1])
 
         result = load_variant(self.store, self.pid, self.sid, second["id"])
         self.assertEqual(second["id"], self.store.load(self.pid)["scenes"][0]["selected_variant"])
-        self.assertEqual((MAX_SECTIONS + 9, ""), (len(result), result[-1]))
+        self.assertEqual("latest changes", self.store.load(self.pid)["scenes"][0]["draft"]["sections"][0]["text"])
+        self.assertEqual(SCENE_VALUE_COUNT, len(result))
+        self.assertIn("Second", result[-1])
         result = delete_variant(self.store, self.pid, self.sid, second["id"])
-        self.assertEqual("Variant deleted", result[-1])
-        self.assertEqual([first["id"]], [variant["id"] for variant in self.store.load(self.pid)["scenes"][0]["variants"]])
+        self.assertIn("Variant deleted", result[-1])
+        scene = self.store.load(self.pid)["scenes"][0]
+        self.assertEqual([self.scene["selected_variant"], first["id"]], [variant["id"] for variant in scene["variants"]])
+        self.assertEqual(first["id"], scene["selected_variant"])
+        self.assertEqual("second draft", scene["draft"]["sections"][0]["text"])
+        step_variant(self.store, self.pid, self.sid, 1)
+        self.assertEqual(self.scene["selected_variant"], self.store.load(self.pid)["scenes"][0]["selected_variant"])
+        step_variant(self.store, self.pid, self.sid, -1)
+        self.assertEqual(first["id"], self.store.load(self.pid)["scenes"][0]["selected_variant"])
 
-    def test_sending_draft_includes_custom_section_edits_without_changing_variant(self):
+    def test_sending_active_variant_includes_and_saves_custom_section_edits(self):
         self.library.save_section_names(["Subject", "Lora"])
+        self.store.delete_scene(self.pid, self.sid)
         sid = self.store.add_scene(self.pid, "Custom")["id"]
         self.store.update_draft(self.pid, sid, "section", "a landscape", 0)
         variant = self.store.save_variant(self.pid, sid, "Before Lora")
@@ -540,14 +808,19 @@ class StoryboardTests(unittest.TestCase):
             draft_prompt(self.store, self.pid, sid),
         )
         scene = self.store._find(self.store.load(self.pid)["scenes"], sid, "Scene")
-        self.assertEqual(variant, scene["variants"][0])
+        active = self.store._find(scene["variants"], variant["id"], "Variant")
+        self.assertEqual("a landscape <lora:example:0.8>", active["prompt"])
+        self.assertEqual("blurry", active["negative"])
+        self.assertEqual("<lora:example:0.8>", active["draft"]["sections"][1]["text"])
+        self.assertEqual("a landscape", scene["variants"][0]["prompt"])
 
-    def test_sending_draft_does_not_require_a_saved_variant(self):
+    def test_sending_first_scene_uses_automatically_saved_start_variant(self):
         self.store.update_draft(self.pid, self.sid, "section", "a landscape", 0)
         self.assertEqual(("prompt", "a landscape", ""), draft_prompt(self.store, self.pid, self.sid))
         scene = self.store.load(self.pid)["scenes"][0]
-        self.assertEqual([], scene["variants"])
-        self.assertIsNone(scene["selected_variant"])
+        self.assertEqual(["Start"], [variant["name"] for variant in scene["variants"]])
+        self.assertEqual(scene["variants"][0]["id"], scene["selected_variant"])
+        self.assertEqual("a landscape", scene["variants"][0]["prompt"])
 
     def test_sending_draft_reports_missing_project_or_scene(self):
         for project_id, scene_id in ((None, None), (self.pid, None), (None, self.sid)):
@@ -583,10 +856,11 @@ class StoryboardTests(unittest.TestCase):
         self.store.refresh_draft_context(self.pid, other["id"])
         self.store.select_asset(self.pid, other["id"], character["id"], None)
         result = delete_asset(self.store, self.pid, other["id"], character["id"])
-        self.assertEqual(([], [], "Asset deleted"), (result[0]["choices"], result[2]["choices"], result[3]))
+        self.assertEqual(([], [("Mara", character["id"])], "Asset deleted"), (result[0]["choices"], result[2]["choices"], result[3]))
         project = self.store.load(self.pid)
         frozen, other_scene = project["scenes"]
-        self.assertEqual([], other_scene["draft"]["selections"])
+        self.assertEqual([character["id"]], [item["asset_id"] for item in other_scene["draft"]["selections"]])
+        self.assertIn("Mara: red hair", other_scene["variants"][0]["prompt"])
         self.assertIn("Mara: red hair, blue coat", self.store.resolve(project, frozen["draft"])[0])
         lamp, _ = self.store.save_asset(self.pid, None, "Object", "Lamp", "a lamp")
         assets, outfits = cast_values(self.store, self.pid, character["id"], outfit["id"])
@@ -621,8 +895,9 @@ class StoryboardTests(unittest.TestCase):
         created = self.store.add_scene(self.pid, "Third")
         self.assertNotEqual(source["id"], created["id"])
         self.assertEqual(source["draft"], created["draft"])
-        self.assertEqual([], created["variants"])
-        self.assertIsNone(created["selected_variant"])
+        self.assertEqual(["Start"], [variant["name"] for variant in created["variants"]])
+        self.assertEqual(created["variants"][0]["id"], created["selected_variant"])
+        self.assertNotIn(created["selected_variant"], [variant["id"] for variant in source["variants"]])
         self.assertEqual(created, self.store.load(self.pid)["scenes"][-1])
 
         self.store.update_draft(self.pid, created["id"], "section", "New subject", 0)
@@ -643,8 +918,9 @@ class StoryboardTests(unittest.TestCase):
         created = self.store.add_scene(self.pid, "Next")
         self.assertEqual(variant["draft"], created["draft"])
         self.assertEqual(("prompt", variant["prompt"], variant["negative"]), draft_prompt(self.store, self.pid, created["id"]))
-        self.assertEqual([], created["variants"])
-        self.assertIsNone(created["selected_variant"])
+        self.assertEqual(["Start"], [variant["name"] for variant in created["variants"]])
+        self.assertEqual(created["variants"][0]["id"], created["selected_variant"])
+        self.assertIsNone(created["variants"][0]["image"])
 
     def test_publication_preserves_exif_orientation_without_metadata(self):
         self.store.update_draft(self.pid, self.sid, "section", "scene", 0)

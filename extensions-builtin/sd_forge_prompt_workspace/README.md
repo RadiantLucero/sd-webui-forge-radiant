@@ -120,20 +120,24 @@ locations and objects. Select the storyboard at the top, then work through the
 steps: **1 · Storyboard** creates it and sets its image directory, **2 · Assets**
 defines its characters, locations and objects, and **3 · Scenes** adds scenes.
 Within a scene, **a · Cast** chooses its assets and **b · Prompt & image** edits
-the draft, variants and image. The first scene starts empty with the library's
-current default section names. Each additional scene copies the current draft
-of the last scene in scene order, regardless of which scene is selected.
+the active variant and its image. The first scene starts empty with the library's
+current default section names and an active variant named **Start**.
+Each additional scene copies the current contents of the last scene in scene
+order, regardless of which scene is selected, into its own **Start** variant.
 This includes its template, sections, negative prompt, asset/outfit selections
-and any frozen definitions, but not saved variants or images. The copy can be
+and any frozen definitions, but not other variants or images. The copy can be
 edited independently. Its template can include section placeholders and free
-text between them. Changes to a scene's draft are saved as you edit.
+text between them. Template, section and negative-prompt edits, asset/outfit
+assignments and definition refreshes are automatically saved into the active
+variant. Other variants are not changed.
 
 Add a project asset with a base description and, for characters, named outfits.
 Asset names are unique within a storyboard, and outfit names within a
 character (ignoring case). **Save asset** updates the asset with the entered
 name or creates it; if an outfit name and description are filled in for a
 character, that outfit is saved as well. **Save outfit** saves only the outfit.
-Deleting an asset removes it from scene drafts; saved variants keep their copy.
+Deleting a project asset removes it from scenes using current definitions;
+variants with frozen definitions keep their copy.
 Descriptions may use library references; the library selector can insert
 snippets into them. In **a · Cast**, select an asset and outfit and add them to
 the scene. In **b · Prompt & image**, its assets appear as draggable buttons.
@@ -142,15 +146,15 @@ template. Alternatively, click a text position and then the asset button.
 This inserts a reference such as `<asset:Old Mill>`, not a copy of the
 description; references can also be typed and ignore case and surrounding
 spaces. Asset names cannot contain `<` or `>`. The reference expands to the
-asset description and selected outfit when previewing or saving a variant.
+asset description and selected outfit when resolving the active variant.
 If an asset is replaced under a new name, update its references manually. Characters include their name before the
 description. The same asset can be referenced at several positions.
 
 New scenes only include assets where you place their references. Older scenes
 retain automatic Subject/Environment placement until you manually place each
 asset; it is then no longer added automatically, even if you remove its token.
-Removing an asset from a scene also removes its references from that draft.
-Saved variants retain their own text and definitions.
+Removing an asset from a scene also removes its references from the active
+variant. Other variants retain their own text and definitions.
 Snippet negative text is not automatically included when inserting into an
 asset; copy it from the library if needed.
 
@@ -161,17 +165,27 @@ selected prompt** to insert it instead of replacing the scene. Both are
 inserted as resolved positive text, not references; negative text is not
 inserted. Refresh the browser after editing the library.
 
-Save a draft as a named variant to preserve its structure, asset definitions,
-library reference texts and resolved positive and negative prompts. Selecting
-another variant immediately replaces the current draft, so save it first if you
-want to keep it. A loaded variant keeps its saved definitions while editing;
-**Use current library and project assets** explicitly refreshes them.
-**Send draft to txt2img/img2img** resolves the current draft, including edits
-made after loading or saving a variant, and immediately replaces the target
-prompt fields. A saved variant is not required, and sending the draft does not
-change saved variants. Previously stored variant prompts and images are not
-rewritten; previewing or sending a loaded draft uses the current punctuation
-handling.
+The **Active scene variant** dropdown immediately activates and loads its selection;
+**Previous** and **Next** cycle through variants. No separate load or save step
+is needed. Enter a new name and choose **Create variant copy** to make an
+independent copy of the current contents and activate it. The copy starts
+without an image; edits to an existing variant keep its assigned image until
+you explicitly replace it. Deleting the active variant activates a neighbor;
+the last remaining variant cannot be deleted.
+
+Variants preserve their asset definitions and library reference texts when
+you leave them. A loaded variant keeps those definitions while editing;
+**Use current library and project assets** refreshes and saves the active
+variant's definitions. **Send active variant to txt2img/img2img** resolves and
+saves its current contents, then immediately replaces the target prompt fields.
+Unfinished or invalid references are still saved, but their resolution error is
+displayed and the resolved prompt fields are cleared rather than showing old
+results. Sending or publishing is blocked until the error is fixed.
+
+Existing storyboards are upgraded automatically on first access. Their latest
+editor contents are adopted into the previously active variant without
+replacing its image or changing other variants. A scene without an active
+variant receives **Start** (or **Start 2**, etc. if that name is already taken).
 
 After generating, open **Assign image to storyboard** below the output gallery,
 select the storyboard and scene, and use the selected gallery image. The
