@@ -41,6 +41,64 @@ def normalize_prompt_text(text: str) -> str:
     return re.sub(r"\s+([,.;:])", r"\1", " ".join(text.split()))
 
 
+def _punctuation_boundary(left: str, right: str) -> tuple[str, str]:
+    left_end = len(left.rstrip())
+    right_start = len(right) - len(right.lstrip())
+    if not left_end or right_start == len(right):
+        return left, right
+
+    previous, following = left[left_end - 1], right[right_start]
+    if following in ",;" and previous in ".,;:!?":
+        right = right[:right_start] + right[right_start + 1 :]
+    elif following == "." and previous == ".":
+        # Preserve a deliberate ellipsis when another period meets it.
+        left_dots = len(left[:left_end]) - len(left[:left_end].rstrip("."))
+        right_dots = len(right[right_start:]) - len(right[right_start:].lstrip("."))
+        right = right[:right_start] + right[right_start + min(left_dots, right_dots) :]
+    elif following == "." and previous in ",;":
+        left = left[: left_end - 1] + "." + left[left_end:]
+        right = right[:right_start] + right[right_start + 1 :]
+    elif following == "." and previous in "!?" and right[right_start + 1 : right_start + 2] != ".":
+        right = right[:right_start] + right[right_start + 1 :]
+    return left, right
+
+
+def join_prompt_parts(left: str, right: str, separator: str) -> str:
+    left, right = left.rstrip(), right.lstrip()
+    if not left or not right:
+        return left or right
+    left, right = _punctuation_boundary(left, right)
+    if not right:
+        return left
+    if right[0].isspace() or right[0] in ",.;:!?":
+        return left + right
+    return left + (" " if left[-1] in ",.;:!?" else separator) + right
+
+
+def substitute_prompt(pattern: re.Pattern[str], text: str, replace: Callable[[re.Match[str]], str]) -> str:
+    result = ""
+    end = 0
+    empty_at_start = False
+    for match in pattern.finditer(text):
+        literal = text[end : match.start()]
+        if empty_at_start:
+            # Remove an orphan separator, but not a decimal such as .5.
+            literal = re.sub(r"^(\s*)[.,;](?=\s|$)", r"\1", literal, count=1)
+        left, right = _punctuation_boundary(result, literal)
+        result = left + right
+        expansion = replace(match)
+        left, right = _punctuation_boundary(result, expansion)
+        result = left + right
+        empty_at_start = not result.strip() and not expansion.strip()
+        end = match.end()
+
+    literal = text[end:]
+    if empty_at_start:
+        literal = re.sub(r"^(\s*)[.,;](?=\s|$)", r"\1", literal, count=1)
+    left, right = _punctuation_boundary(result, literal)
+    return left + right
+
+
 @dataclass(frozen=True)
 class PromptEntry:
     id: str
@@ -80,7 +138,7 @@ def resolve_references(text: str, references: dict[str, str], trail: tuple[str, 
             raise ValueError(f"Unknown reference <{name}>")
         return resolve_references(references[key], references, (*trail, key), allow_unknown)
 
-    return REFERENCE_PATTERN.sub(replace, text)
+    return substitute_prompt(REFERENCE_PATTERN, text, replace)
 
 
 def compose_prompt(template: str, sections: list[dict[str, str]], references: dict[str, str]) -> str:
@@ -92,7 +150,7 @@ def compose_prompt(template: str, sections: list[dict[str, str]], references: di
             raise ValueError(f"Unknown section <<{name}>>")
         return f" {texts[name.casefold()]} "
 
-    return normalize_prompt_text(resolve_references(SECTION_PATTERN.sub(replace, template), references))
+    return normalize_prompt_text(resolve_references(substitute_prompt(SECTION_PATTERN, template, replace), references))
 
 
 def used_section_names(template: str, section_names: list[str]) -> list[str]:

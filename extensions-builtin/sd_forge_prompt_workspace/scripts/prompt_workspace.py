@@ -8,6 +8,7 @@ from prompt_workspace_data import (
     MAX_SECTIONS,
     PromptEntry,
     PromptWorkspaceStore,
+    join_prompt_parts,
     library_path,
     used_section_names,
     validate_section_names,
@@ -244,9 +245,9 @@ def insert_snippet(store, snippet_id, target, negative_prompt, names_json, *text
     texts = list(texts)
     index = names.index(target)
     addition = f"<{snippet.reference}>" if snippet.reference else snippet.prompt
-    texts[index] = " ".join(part for part in (texts[index].strip(), addition) if part)
+    texts[index] = join_prompt_parts(texts[index].strip(), addition, " ")
     if snippet.negative_prompt:
-        negative_prompt = ", ".join(part for part in (negative_prompt.strip(), snippet.negative_prompt) if part)
+        negative_prompt = join_prompt_parts(negative_prompt.strip(), snippet.negative_prompt, ", ")
     return (*texts, negative_prompt)
 
 
@@ -388,8 +389,17 @@ def select_quick_prompt(store, entry_id):
 
 
 def quick_apply_js(tabname, replace):
-    tab_id = json.dumps(tabname)
     action = "true" if replace else "false"
+    if tabname == "storyboard":
+        return f"""function(kind, prompt, negativePrompt) {{
+            if ((kind === "prompt") !== {action}) return [""];
+            if (!prompt) return ["The selected entry has no positive text to insert"];
+            if (typeof window.promptWorkspaceInsertStoryboardText !== "function") return ["Storyboard insertion unavailable; reload the UI"];
+            const error = window.promptWorkspaceInsertStoryboardText(prompt);
+            if (error) return [error];
+            return [negativePrompt ? "Inserted in the scene field. The entry's negative prompt was not inserted." : "Inserted in the scene field."];
+        }}"""
+    tab_id = json.dumps(tabname)
     return f"""function(kind, prompt, negativePrompt) {{
         const replace = {action};
         if ((kind === "prompt") !== replace) return [""];
@@ -397,6 +407,7 @@ def quick_apply_js(tabname, replace):
         const positive = app.getElementById({tab_id} + "_prompt")?.querySelector("textarea");
         const negative = app.getElementById({tab_id} + "_neg_prompt")?.querySelector("textarea");
         if (!positive || !negative) return ["Could not find the prompt fields"];
+        if (!replace && !window.promptWorkspaceText) return ["Prompt Workspace text helper unavailable; reload the UI"];
         if (replace) {{
             positive.value = prompt;
             negative.value = negativePrompt;
@@ -404,17 +415,10 @@ def quick_apply_js(tabname, replace):
             updateInput(negative);
         }} else {{
             if (prompt) {{
-                const start = positive.selectionStart;
-                const end = positive.selectionEnd;
-                const before = positive.value.slice(0, start);
-                const after = positive.value.slice(end);
-                const left = before && !/\\s$/.test(before) ? " " : "";
-                const right = after && !/^\\s/.test(after) ? " " : "";
-                positive.setRangeText(left + prompt + right, start, end, "end");
-                updateInput(positive);
+                window.promptWorkspaceText.insert(positive, prompt);
             }}
             if (negativePrompt) {{
-                negative.value = negative.value.trimEnd() + (negative.value.trim() ? ", " : "") + negativePrompt;
+                negative.value = window.promptWorkspaceText.join(negative.value, negativePrompt, ", ");
                 updateInput(negative);
             }}
         }}
@@ -423,15 +427,19 @@ def quick_apply_js(tabname, replace):
 
 
 def quick_browser(store, tabname):
+    is_storyboard = tabname == "storyboard"
     categories, category_value, choices, page, last_page, total = quick_page(store, "All categories", "", 0)
     with gr.Accordion("Prompt Workspace", open=False, elem_id=f"{tabname}_prompt_workspace_browser", elem_classes=["prompt-workspace-ui"]):
+        if is_storyboard:
+            gr.Markdown("Click in the scene template or a section, then choose a snippet or select and insert a saved prompt. Entries are inserted as resolved positive text.")
         with gr.Row(equal_height=False):
             category = gr.Dropdown(label="Category", choices=categories, value=category_value)
             search = gr.Textbox(label="Search", placeholder="Search library")
             refresh = ToolButton(value=refresh_symbol, tooltip="Refresh library")
         as_reference = gr.Checkbox(
             label="Insert snippets as references",
-            value=True,
+            value=not is_storyboard,
+            visible=not is_storyboard,
             info="Snippets without a reference name are inserted as text.",
         )
         grid_rows = []
@@ -456,7 +464,7 @@ def quick_browser(store, tabname):
             next_page = gr.Button("Next", size="sm", scale=0, min_width=0, interactive=page < last_page)
         preview = gr.Textbox(label="Selected entry", lines=2, interactive=False)
         quick_status = gr.Markdown()
-        apply_saved = gr.Button("Replace with selected prompt", size="sm", scale=0, min_width=0, interactive=False)
+        apply_saved = gr.Button("Insert selected prompt" if is_storyboard else "Replace with selected prompt", size="sm", scale=0, min_width=0, interactive=False)
         page_index = gr.Number(value=0, precision=0, visible=False)
         grid_ids = gr.Textbox(value=json.dumps([entry_id for _, entry_id in choices]), visible=False)
         selected_id = gr.Textbox(visible=False)
@@ -549,12 +557,13 @@ def apply_prompt_js(tabname):
         if (!(prompt || "").trim() && !(negativePrompt || "").trim()) {{
             return ["There is no resolved prompt to apply. Check the messages below the result."];
         }}
+        if (kind === "snippet" && !window.promptWorkspaceText) return ["Prompt Workspace text helper unavailable; reload the UI"];
 
         function apply(target, text, append, separator) {{
             const value = (text || "").trim().replace(/\\s+/g, " ");
             if (append && !value) return;
             const current = target.value.trim();
-            target.value = append ? (current && value ? current + separator + value : current || value) : value;
+            target.value = append ? window.promptWorkspaceText.join(current, value, separator) : value;
             updateInput(target);
         }}
 
@@ -731,7 +740,7 @@ def prompt_workspace_ui():
 def prompt_workspace_tab():
     return [
         (prompt_workspace_ui(), "Prompt Workspace", "prompt-workspace"),
-        (storyboard_ui(workspace_store(), apply_prompt_js), "Storyboard", "storyboard"),
+        (storyboard_ui(workspace_store(), apply_prompt_js, quick_browser), "Storyboard", "storyboard"),
     ]
 
 

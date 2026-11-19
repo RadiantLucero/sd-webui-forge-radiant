@@ -20,6 +20,15 @@
         if (promptField(target)) activeField = target;
     });
 
+    window.promptWorkspaceInsertStoryboardText = (text) => {
+        if (!activeField?.isConnected || !promptField(activeField) || !uiElementIsVisible(activeField)) {
+            return "Click the desired position in a section or the template first.";
+        }
+        if (!window.promptWorkspaceText) return "Prompt Workspace text helper unavailable; reload the UI.";
+        window.promptWorkspaceText.insert(activeField, text);
+        return "";
+    };
+
     document.addEventListener("dragstart", (event) => {
         const chip = assetChip(event);
         if (!chip || !event.dataTransfer) return;

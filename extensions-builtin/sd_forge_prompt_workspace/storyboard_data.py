@@ -12,8 +12,10 @@ from PIL import Image, ImageOps, PngImagePlugin
 from prompt_workspace_data import (
     REFERENCE_PATTERN,
     compose_prompt,
+    join_prompt_parts,
     reference_map,
     resolve_references,
+    substitute_prompt,
 )
 
 _lock = threading.RLock()
@@ -312,10 +314,10 @@ class StoryboardStore:
         ambiguous = set()
         for selected in scene_draft["selections"]:
             asset = self._find(assets, selected["asset_id"], "Asset")
-            parts = [asset["text"]]
+            text = asset["text"]
             if selected["outfit_id"]:
-                parts.append(self._find(asset["outfits"], selected["outfit_id"], "Outfit")["text"])
-            text = ", ".join(parts)
+                outfit = self._find(asset["outfits"], selected["outfit_id"], "Outfit")
+                text = join_prompt_parts(text, outfit["text"], ", ")
             if asset["kind"] == "Character":
                 text = f"{asset['name']}: {text}"
             key = asset["name"].casefold()
@@ -326,7 +328,7 @@ class StoryboardStore:
                 section_name = "Subject" if asset["kind"] in ("Character", "Object") else "Environment"
                 fallback_index = 0 if section_name == "Subject" else min(2, len(sections) - 1)
                 target = next((section for section in sections if section["name"].casefold() == section_name.casefold()), sections[fallback_index])
-                target["text"] = "; ".join(part for part in (target["text"].strip(), text) if part)
+                target["text"] = join_prompt_parts(target["text"].strip(), text, "; ")
 
         def expand_assets(text):
             def replace(match):
@@ -337,7 +339,7 @@ class StoryboardStore:
                     raise ValueError(f"Asset reference {match.group(0)} is not assigned to this scene")
                 return asset_texts[key]
 
-            return ASSET_REFERENCE_PATTERN.sub(replace, text)
+            return substitute_prompt(ASSET_REFERENCE_PATTERN, text, replace)
 
         for section in sections:
             section["text"] = expand_assets(section["text"])

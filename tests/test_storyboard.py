@@ -26,6 +26,7 @@ from storyboard_ui import (
     delete_variant,
     draft_prompt,
     gallery_callback,
+    insert_snippet,
     load_variant,
     prompt_step_values,
     remove_selection,
@@ -102,6 +103,7 @@ class StoryboardJavaScriptTests(unittest.TestCase):
 const assert = require("node:assert/strict");
 const handlers = {};
 const status = {textContent: ""};
+const window = {};
 const document = {addEventListener: (name, callback) => handlers[name] = callback};
 function gradioApp() { return {querySelector: () => status}; }
 function uiElementIsVisible(field) { return field.visible; }
@@ -144,6 +146,77 @@ assert.equal(transfer.effectAllowed, "copy");
 input.visible = false;
 handlers.click(click);
 assert.equal(inputEvents, 1);
+""",
+        )
+
+    def test_library_insertion_uses_the_active_scene_field_and_reports_missing_focus(self):
+        self.run_script(
+            "storyboard.js",
+            r"""
+const assert = require("node:assert/strict");
+const handlers = {};
+const document = {addEventListener: (name, callback) => handlers[name] = callback};
+let inserted = [];
+const window = {promptWorkspaceText: {insert: (field, text) => inserted.push([field, text])}};
+function gradioApp() { return {querySelector: () => null}; }
+function uiElementIsVisible(field) { return field.visible; }
+class HTMLTextAreaElement {
+    constructor() { this.isConnected = true; this.visible = true; }
+    closest(selector) { return selector === ".storyboard-prompt-source" ? this : null; }
+}
+const input = new HTMLTextAreaElement();
+""",
+            r"""
+assert.match(window.promptWorkspaceInsertStoryboardText("rain"), /Click the desired position/);
+handlers.focusin({composedPath: () => [input]});
+assert.equal(window.promptWorkspaceInsertStoryboardText("rain"), "");
+assert.deepEqual(inserted, [[input, "rain"]]);
+input.visible = false;
+assert.match(window.promptWorkspaceInsertStoryboardText("fog"), /Click the desired position/);
+assert.equal(inserted.length, 1);
+input.visible = true;
+delete window.promptWorkspaceText;
+assert.match(window.promptWorkspaceInsertStoryboardText("fog"), /unavailable/);
+""",
+        )
+
+    def test_text_helper_joins_punctuation_and_inserts_at_the_cursor(self):
+        self.run_script(
+            "promptWorkspaceText.js",
+            r"""
+const assert = require("node:assert/strict");
+const window = {};
+let events = 0;
+function updateInput() { events++; }
+class Textarea {
+    constructor(value, start, end) {
+        this.value = value;
+        this.selectionStart = start;
+        this.selectionEnd = end;
+    }
+    focus() {}
+    setRangeText(text, start, end) {
+        this.value = this.value.slice(0, start) + text + this.value.slice(end);
+    }
+    setSelectionRange(start, end) { this.selectionStart = start; this.selectionEnd = end; }
+}
+""",
+            r"""
+const {join, insert} = window.promptWorkspaceText;
+assert.equal(join("blur.", "grain", ", "), "blur. grain");
+assert.equal(join("blur,", ", grain", ", "), "blur, grain");
+assert.equal(join("blur", "grain", ", "), "blur, grain");
+assert.equal(join("blur...", ".", ", "), "blur...");
+const field = new Textarea("A selected. Next", 2, 10);
+insert(field, "traveler.");
+assert.equal(field.value, "A traveler. Next");
+assert.equal(field.selectionStart, "A traveler.".length);
+assert.equal(field.selectionEnd, field.selectionStart);
+assert.equal(events, 1);
+const deliberate = new Textarea("Wait... here?", 8, 12);
+insert(deliberate, "wow...");
+assert.equal(deliberate.value, "Wait... wow...?");
+assert.equal(events, 2);
 """,
         )
 
@@ -259,6 +332,37 @@ class StoryboardTests(unittest.TestCase):
         self.assertEqual((prompt, negative), (variant["prompt"], variant["negative"]))
         self.store.update_draft(self.pid, self.sid, "section", "", 1)
         self.assertNotIn("Mara", prompt_step_values(self.store, self.pid, self.sid)[1])
+
+    def test_asset_and_outfit_punctuation_is_combined_without_extra_separators(self):
+        self.snippet(None, "red hair.")
+        character, outfit = self.store.save_asset(self.pid, None, "Character", "Mara", "<character>", "Coat", "blue coat.")
+        self.store.select_asset(self.pid, self.sid, character["id"], outfit["id"])
+        self.store.update_draft(self.pid, self.sid, "section", asset_reference(character["name"]), 0)
+        self.store.update_draft(self.pid, self.sid, "template", "<<Subject>>. <<Action>>. <<Environment>>.")
+        self.assertEqual("Mara: red hair. blue coat.", prompt_step_values(self.store, self.pid, self.sid)[1])
+        variant = self.store.save_variant(self.pid, self.sid, "Original")
+        project = self.store.load(self.pid)
+        project["scenes"][0]["variants"][0]["prompt"] = "Mara: red hair., blue coat.."
+        self.store._write(project)
+        self.store.select_variant(self.pid, self.sid, variant["id"])
+        self.assertEqual("Mara: red hair. blue coat.", draft_prompt(self.store, self.pid, self.sid)[1])
+        self.assertEqual("Mara: red hair., blue coat..", self.store.load(self.pid)["scenes"][0]["variants"][0]["prompt"])
+
+    def test_inserting_a_snippet_into_an_asset_avoids_a_doubled_period(self):
+        snippet = self.library.save_entry(
+            None, kind="snippet", name="Mist", category="Weather", tags=[],
+            prompt=". mist", negative_prompt="",
+        )
+        self.assertEqual(("a station. mist", ""), insert_snippet(self.library, snippet.id, "a station."))
+
+    def test_legacy_automatic_asset_placement_does_not_add_a_semicolon_after_a_period(self):
+        character, _ = self.store.save_asset(self.pid, None, "Character", "Mara", "red hair")
+        project = self.store.load(self.pid)
+        del project["scenes"][0]["draft"]["asset_placement"]
+        self.store._write(project)
+        self.store.select_asset(self.pid, self.sid, character["id"], None)
+        self.store.update_draft(self.pid, self.sid, "section", "Foreground.", 0)
+        self.assertEqual("Foreground. Mara: red hair", prompt_step_values(self.store, self.pid, self.sid)[1])
 
     def test_asset_references_match_names_flexibly_and_reject_ambiguity(self):
         character, _ = self.store.save_asset(self.pid, None, "Character", "Old Mara", "red hair")

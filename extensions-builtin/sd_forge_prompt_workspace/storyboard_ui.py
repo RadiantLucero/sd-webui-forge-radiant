@@ -4,7 +4,7 @@ from html import escape
 
 import gradio as gr
 from gradio.context import get_blocks_context
-from prompt_workspace_data import MAX_SECTIONS
+from prompt_workspace_data import MAX_SECTIONS, join_prompt_parts
 from storyboard_data import StoryboardStore, asset_reference
 
 
@@ -31,7 +31,7 @@ def snippet_choices(library):
 def insert_snippet(library, entry_id, target):
     _, text, negative = library.select_entry(entry_id, as_reference=True)
     warning = "This snippet also has a negative prompt; copy it from the library if needed." if negative else ""
-    return " ".join(part for part in (target.strip(), text) if part), warning
+    return join_prompt_parts(target.strip(), text, " "), warning
 
 
 def empty_scene_values():
@@ -297,7 +297,7 @@ def prompt_step_values(store, project_id, scene_id):
     return asset_palette(store, project, scene), *store.resolve(project, scene["draft"])
 
 
-def storyboard_ui(library, apply_js):
+def storyboard_ui(library, apply_js, build_library_browser):
     store = StoryboardStore(library.path.parent / "storyboards", library)
     with gr.Blocks(analytics_enabled=False) as ui, gr.Column(elem_classes=["prompt-workspace-ui"]):
         project = gr.Dropdown(label="Storyboard", choices=project_choices(store))
@@ -365,6 +365,7 @@ def storyboard_ui(library, apply_js):
                             sections += [gr.Textbox(label=f"Section {index + 1}", lines=2, visible=False, interactive=False, elem_classes=["storyboard-prompt-source"]) for index in range(5, MAX_SECTIONS)]
                         negative = gr.Textbox(label="Negative prompt", lines=2, interactive=False, elem_classes=["prompt-workspace-negative"])
                         draft_status = gr.Markdown()
+                        build_library_browser(library, "storyboard")
                         with gr.Row(equal_height=False):
                             variant = gr.Dropdown(label="Scene variant")
                             with gr.Row(equal_height=False, elem_classes=["prompt-workspace-actions"]):

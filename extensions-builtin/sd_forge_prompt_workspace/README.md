@@ -81,6 +81,9 @@ prompts use the default section names below:
 6. Details
 7. Style
 
+Duplicate separators at the boundaries of expanded sections, references and
+storyboard assets are avoided; punctuation inside the original text is kept.
+
 Change the defaults in **Default sections** in the tab. Enter one name per
 line; up to 10 names are supported. Each prompt stores its own section list,
 so changing the defaults does not alter existing prompts. **Add default
@@ -147,6 +150,13 @@ Saved variants retain their own text and definitions.
 Snippet negative text is not automatically included when inserting into an
 asset; copy it from the library if needed.
 
+In **b · Prompt & image**, open **Prompt Workspace** to browse the library by
+category or search. Click in the scene template or a section, then click a
+snippet to insert it at that position. Select a saved prompt and use **Insert
+selected prompt** to insert it instead of replacing the scene. Both are
+inserted as resolved positive text, not references; negative text is not
+inserted. Refresh the browser after editing the library.
+
 Save a draft as a named variant to preserve its structure, asset definitions,
 library reference texts and resolved positive and negative prompts. Selecting
 another variant immediately replaces the current draft, so save it first if you
@@ -155,7 +165,9 @@ want to keep it. A loaded variant keeps its saved definitions while editing;
 **Send draft to txt2img/img2img** resolves the current draft, including edits
 made after loading or saving a variant, and immediately replaces the target
 prompt fields. A saved variant is not required, and sending the draft does not
-change saved variants.
+change saved variants. Previously stored variant prompts and images are not
+rewritten; previewing or sending a loaded draft uses the current punctuation
+handling.
 
 After generating, open **Assign image to storyboard** below the output gallery,
 select the storyboard and scene, and use the selected gallery image. The

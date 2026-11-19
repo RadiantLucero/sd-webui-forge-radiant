@@ -1,5 +1,7 @@
 import importlib.util
 import json
+import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -74,6 +76,33 @@ class PromptWorkspaceStoreTests(unittest.TestCase):
 
     def test_prompt_normalization_removes_spaces_before_punctuation(self):
         self.assertEqual("one, two. three; four: five", normalize_prompt_text("one  ,  two . three ; four : five"))
+
+    def test_composition_avoids_punctuation_collisions_at_section_and_reference_boundaries(self):
+        self.store.save_entry(
+            None, kind="snippet", name="Light", category="Weather", tags=[],
+            prompt="soft light...", negative_prompt="", reference="light",
+        )
+        sections = [{"name": "Empty", "text": ""}, {"name": "Lighting", "text": "<light>"}]
+        self.assertEqual(
+            "soft light...",
+            self.store.preview("prompt", "<<Empty>>, <<Lighting>>. <<Empty>>.", sections),
+        )
+        self.assertEqual(
+            "Literal...?! 1.25 <lora:style:0.8>",
+            self.store.preview("prompt", "Literal...?! 1.25 <lora:style:0.8> <<Empty>>", sections),
+        )
+        self.assertEqual(".5 exposure", self.store.preview("prompt", "<<Empty>>.5 exposure", sections))
+
+    def test_generation_removes_extra_punctuation_only_at_reference_boundaries(self):
+        self.store.save_entry(
+            None, kind="snippet", name="Rain", category="Weather", tags=[],
+            prompt="soft rain.", negative_prompt="", reference="rain",
+        )
+        processing = FakeProcessing("<rain>. Intentional... <lora:style:0.8>", "<rain>, grain")
+        install_prompt_resolver(processing, lambda: self.store)
+        processing.setup_prompts()
+        self.assertEqual(["soft rain. Intentional... <lora:style:0.8>"], processing.all_prompts)
+        self.assertEqual(["soft rain. grain"], processing.all_negative_prompts)
 
     def test_switching_library_directory_does_not_move_or_replace_libraries(self):
         extension_dir = Path(self.temp_dir.name) / "extension"
@@ -1012,6 +1041,84 @@ class PromptWorkspaceBrowserTests(unittest.TestCase):
         with patch.object(self.browser.shared, "opts", SimpleNamespace(prompt_workspace_show_negative_prompts=True), create=True):
             selected = self.browser.select_quick_entry(self.store, 0, json.dumps([snippet.id]), False)
         self.assertEqual(("bright sky", "dark clouds\n\nNegative prompt: bright sky"), selected[2:4])
+
+    def test_inserting_snippet_does_not_add_a_comma_after_existing_punctuation(self):
+        snippet = self.store.save_entry(
+            None, kind="snippet", name="Rain", category="Weather", tags=[],
+            prompt="rain", negative_prompt="bright", reference="rain",
+        )
+        for original, expected in (("blur.", "blur. bright"), ("blur,", "blur, bright"), ("blur", "blur, bright")):
+            with self.subTest(original=original):
+                result = self.browser.insert_snippet(self.store, snippet.id, "Weather", original, '["Weather"]', "")
+                self.assertEqual(("<rain>", expected), result)
+        mist = self.store.save_entry(
+            None, kind="snippet", name="Mist", category="Weather", tags=[],
+            prompt=", mist", negative_prompt="",
+        )
+        result = self.browser.insert_snippet(self.store, mist.id, "Weather", "", '["Weather"]', "clouds,")
+        self.assertEqual(("clouds, mist", ""), result)
+
+    @unittest.skipUnless(shutil.which("node"), "JavaScript callback tests require Node.js")
+    def test_storyboard_browser_inserts_selected_positive_text_without_replacing_the_draft(self):
+        snippet_js = self.browser.quick_apply_js("storyboard", False)
+        prompt_js = self.browser.quick_apply_js("storyboard", True)
+        script = f"""
+const assert = require("node:assert/strict");
+const inserted = [];
+const window = {{promptWorkspaceInsertStoryboardText: text => {{ inserted.push(text); return ""; }}}};
+const snippet = ({snippet_js});
+const prompt = ({prompt_js});
+assert.match(snippet("snippet", "rain", "bright")[0], /negative prompt was not inserted/);
+assert.deepEqual(snippet("prompt", "a scene", ""), [""]);
+assert.deepEqual(prompt("prompt", "a scene", ""), ["Inserted in the scene field."]);
+assert.deepEqual(inserted, ["rain", "a scene"]);
+window.promptWorkspaceInsertStoryboardText = () => "Click a section first.";
+assert.deepEqual(snippet("snippet", "rain", ""), ["Click a section first."]);
+assert.match(snippet("snippet", "", "")[0], /no positive text/);
+"""
+        result = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=10)
+        self.assertEqual(0, result.returncode, result.stderr)
+
+    @unittest.skipUnless(shutil.which("node"), "JavaScript callback tests require Node.js")
+    def test_library_insertion_keeps_existing_punctuation_in_generation_fields(self):
+        helper = (EXTENSION_DIR / "javascript" / "promptWorkspaceText.js").read_text(encoding="utf-8")
+        quick = self.browser.quick_apply_js("txt2img", False)
+        apply = self.browser.apply_prompt_js("txt2img")
+        script = f"""
+const assert = require("node:assert/strict");
+const window = {{}};
+let events = 0;
+function updateInput() {{ events++; }}
+function switch_to_txt2img() {{}}
+class Textarea {{
+    constructor(value, start, end) {{ this.value = value; this.selectionStart = start; this.selectionEnd = end; }}
+    focus() {{}}
+    setRangeText(text, start, end) {{ this.value = this.value.slice(0, start) + text + this.value.slice(end); }}
+    setSelectionRange(start, end) {{ this.selectionStart = start; this.selectionEnd = end; }}
+}}
+const positive = new Textarea("A selected. Next", 2, 10);
+const negative = new Textarea("blur.", 0, 0);
+function gradioApp() {{
+    return {{getElementById: id => ({{querySelector: () => id === "txt2img_prompt" ? positive : negative}})}};
+}}
+{helper}
+const quick = ({quick});
+const apply = ({apply});
+assert.deepEqual(quick("snippet", "traveler.", "grain"), [""]);
+assert.equal(positive.value, "A traveler. Next");
+assert.equal(negative.value, "blur. grain");
+assert.equal(events, 2);
+positive.value = "existing.";
+negative.value = "blur,";
+assert.deepEqual(apply("snippet", "light", "grain"), [""]);
+assert.equal(positive.value, "existing. light");
+assert.equal(negative.value, "blur, grain");
+assert.deepEqual(apply("prompt", "replacement", "negative"), [""]);
+assert.equal(positive.value, "replacement");
+assert.equal(negative.value, "negative");
+"""
+        result = subprocess.run(["node", "-e", script], capture_output=True, text=True, timeout=10)
+        self.assertEqual(0, result.returncode, result.stderr)
 
     def test_selecting_grid_entries_and_installing_generation_resolver(self):
         snippet = self.store.save_entry(
