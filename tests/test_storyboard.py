@@ -580,6 +580,7 @@ class StoryboardTests(unittest.TestCase):
         self.store.update_draft(self.pid, self.sid, "section", asset_reference(character["name"]), 0)
         self.store.select_variant(self.pid, self.sid, self.store.save_variant(self.pid, self.sid, "Frozen")["id"])
         other = self.store.add_scene(self.pid, "Other")
+        self.store.refresh_draft_context(self.pid, other["id"])
         self.store.select_asset(self.pid, other["id"], character["id"], None)
         result = delete_asset(self.store, self.pid, other["id"], character["id"])
         self.assertEqual(([], [], "Asset deleted"), (result[0]["choices"], result[2]["choices"], result[3]))
@@ -592,7 +593,8 @@ class StoryboardTests(unittest.TestCase):
         self.assertEqual(([("Object: Lamp", lamp["id"])], None, None), (assets["choices"], assets["value"], outfits["value"]))
         self.assertEqual(lamp["id"], cast_values(self.store, self.pid, lamp["id"], None)[0]["value"])
 
-    def test_new_scenes_use_configured_section_names(self):
+    def test_first_scene_uses_configured_section_names(self):
+        self.store.delete_scene(self.pid, self.sid)
         self.library.save_section_names(["Character", "Place"])
         scene = self.store.add_scene(self.pid, "Custom")
         self.assertEqual(["Character", "Place"], [section["name"] for section in scene["draft"]["sections"]])
@@ -602,6 +604,47 @@ class StoryboardTests(unittest.TestCase):
         project = self.store.load(self.pid)
         selected = next(item for item in project["scenes"] if item["id"] == scene["id"])
         self.assertEqual("a station", self.store.resolve(project, selected["draft"])[0])
+
+    def test_new_scene_copies_the_current_draft_of_the_last_scene_in_order(self):
+        self.store.update_draft(self.pid, self.sid, "template", "<<Subject>> walks. <<Action>>")
+        self.store.update_draft(self.pid, self.sid, "section", "Mara", 0)
+        self.store.update_draft(self.pid, self.sid, "section", "Looking back", 1)
+        self.store.update_draft(self.pid, self.sid, "negative", "blur")
+        self.store.save_variant(self.pid, self.sid, "Earlier")
+        self.store.update_draft(self.pid, self.sid, "section", "Mara in the rain", 0)
+        second = self.store.add_scene(self.pid, "Second")
+        self.store.update_draft(self.pid, second["id"], "section", "Different subject", 0)
+        self.store.move_scene(self.pid, second["id"], -1)
+        self.library.save_section_names(["Different defaults"])
+        source = self.store._find(self.store.load(self.pid)["scenes"], self.sid, "Scene")
+
+        created = self.store.add_scene(self.pid, "Third")
+        self.assertNotEqual(source["id"], created["id"])
+        self.assertEqual(source["draft"], created["draft"])
+        self.assertEqual([], created["variants"])
+        self.assertIsNone(created["selected_variant"])
+        self.assertEqual(created, self.store.load(self.pid)["scenes"][-1])
+
+        self.store.update_draft(self.pid, created["id"], "section", "New subject", 0)
+        original = self.store._find(self.store.load(self.pid)["scenes"], self.sid, "Scene")
+        self.assertEqual(source, original)
+
+    def test_new_scene_keeps_frozen_asset_and_library_definitions_without_copying_variants(self):
+        snippet = self.snippet(None, "red hair")
+        character, outfit = self.store.save_asset(self.pid, None, "Character", "Mara", "<character>", "Coat", "blue coat")
+        self.store.select_asset(self.pid, self.sid, character["id"], outfit["id"])
+        self.store.update_draft(self.pid, self.sid, "section", asset_reference(character["name"]), 0)
+        variant = self.store.save_variant(self.pid, self.sid, "Frozen")
+        self.store.select_variant(self.pid, self.sid, variant["id"])
+        self.store.assign_image(self.pid, self.sid, variant["id"], Image.new("RGB", (1, 1)), "")
+        self.snippet(snippet.id, "dark hair")
+        self.store.save_outfit(self.pid, character["id"], "Coat", "red coat")
+
+        created = self.store.add_scene(self.pid, "Next")
+        self.assertEqual(variant["draft"], created["draft"])
+        self.assertEqual(("prompt", variant["prompt"], variant["negative"]), draft_prompt(self.store, self.pid, created["id"]))
+        self.assertEqual([], created["variants"])
+        self.assertIsNone(created["selected_variant"])
 
     def test_publication_preserves_exif_orientation_without_metadata(self):
         self.store.update_draft(self.pid, self.sid, "section", "scene", 0)

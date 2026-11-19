@@ -120,9 +120,13 @@ locations and objects. Select the storyboard at the top, then work through the
 steps: **1 · Storyboard** creates it and sets its image directory, **2 · Assets**
 defines its characters, locations and objects, and **3 · Scenes** adds scenes.
 Within a scene, **a · Cast** chooses its assets and **b · Prompt & image** edits
-the draft, variants and image. The scene editor uses the library's current
-default section names when a scene is created. Its template can include section placeholders
-and free text between them. Changes to a scene's draft are saved as you edit.
+the draft, variants and image. The first scene starts empty with the library's
+current default section names. Each additional scene copies the current draft
+of the last scene in scene order, regardless of which scene is selected.
+This includes its template, sections, negative prompt, asset/outfit selections
+and any frozen definitions, but not saved variants or images. The copy can be
+edited independently. Its template can include section placeholders and free
+text between them. Changes to a scene's draft are saved as you edit.
 
 Add a project asset with a base description and, for characters, named outfits.
 Asset names are unique within a storyboard, and outfit names within a

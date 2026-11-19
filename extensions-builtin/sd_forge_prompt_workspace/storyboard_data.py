@@ -152,7 +152,8 @@ class StoryboardStore:
     def add_scene(self, project_id, name):
         with _lock:
             project = self.load(project_id)
-            scene = {"id": new_id(), "name": required_text(name, "Scene name"), "draft": draft(self.library.section_names()), "variants": [], "selected_variant": None}
+            scene_draft = deepcopy(project["scenes"][-1]["draft"]) if project["scenes"] else draft(self.library.section_names())
+            scene = {"id": new_id(), "name": required_text(name, "Scene name"), "draft": scene_draft, "variants": [], "selected_variant": None}
             project["scenes"].append(scene)
             self._write(project)
             return scene
